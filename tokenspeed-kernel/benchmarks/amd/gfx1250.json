@@ -1,0 +1,25 @@
+{
+  "schema_version": 1,
+  "suite_id": "amd-gfx1250-registration-kernels-from-gfx950",
+  "environment": {
+    "vendor": "amd",
+    "arch": "12.5"
+  },
+  "timer": {
+    "eager_warmup_iterations": 5,
+    "replay_warmup_iterations": 3,
+    "measurement_blocks": 30
+  },
+  "case_files": [
+    "gfx1250/glm53_flash/kda.json",
+    "gfx1250/glm53_flash/dsa.json",
+    "gfx1250/glm53_flash/moe.json",
+    "gfx1250/dsv41_flash/gemm.json",
+    "gfx1250/kimi_k3/moe.json",
+    "gfx1250/kimi_k3/mla.json",
+    "gfx1250/kimi_k3/gemm.json",
+    "gfx1250/kimi_k3/kda.json",
+    "gfx1250/kimi_k3/residual.json"
+  ],
+  "cases": []
+}
