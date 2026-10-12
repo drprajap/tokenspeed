@@ -382,10 +382,9 @@ class ProducerLamport:
         )
 
     @staticmethod
-    def heap_bytes(max_numel: int) -> int:
+    def heap_bytes(max_numel: int, world_size: int) -> int:
         return allocation_bytes(
-            (ProducerLamport.NUM_STAGES, ProducerLamport.WORLD_SIZE, max_numel),
-            torch.bfloat16,
+            (ProducerLamport.NUM_STAGES, world_size, max_numel), torch.bfloat16
         )
 
     def __init__(
@@ -417,6 +416,7 @@ class ProducerLamport:
         )
 
     def run(self, out: torch.Tensor) -> None:
+        arch = iris_arch_config()
         iris_lamport_allreduce[(out.numel() // self.BLOCK_ELEMENTS,)](
             self.producer.data,
             self.mailbox,
@@ -428,6 +428,8 @@ class ProducerLamport:
             TOTAL_ELEMENTS=out.numel(),
             MAX_ELEMENTS=self.max_numel,
             NUM_STAGES=self.NUM_STAGES,
+            SUBGROUP_SIZE=arch.subgroup_size,
+            REMOTE_STORE_CACHE=arch.remote_store_cache,
             num_warps=self.NUM_SUBGROUPS,
         )
 
@@ -634,13 +636,18 @@ def iris_lamport_allreduce(
     TOTAL_ELEMENTS: gl.constexpr,
     MAX_ELEMENTS: gl.constexpr,
     NUM_STAGES: gl.constexpr,
+    SUBGROUP_SIZE: gl.constexpr,
+    REMOTE_STORE_CACHE: gl.constexpr,
 ):
     """Push BF16 tiles and poll all peer packs with one subgroup per tile."""
-    gl.static_assert(WORLD_SIZE == 8)
+    gl.static_assert(WORLD_SIZE == 2 or WORLD_SIZE == 4 or WORLD_SIZE == 8)
     gl.static_assert(TOTAL_ELEMENTS % 512 == 0)
     gl.static_assert(TOTAL_ELEMENTS <= MAX_ELEMENTS)
     gl.static_assert(NUM_STAGES >= 3)
-    layout: gl.constexpr = gl.BlockedLayout([1, 8], [64, 1], [1, 1], [0, 1])
+    # Each lane owns 64 / SUBGROUP_SIZE consecutive 16-byte packs of the tile.
+    layout: gl.constexpr = gl.BlockedLayout(
+        [64 // SUBGROUP_SIZE, 8], [SUBGROUP_SIZE, 1], [1, 1], [1, 0]
+    )
     pack = gl.program_id(0) * 64 + gl.arange(0, 64, layout=gl.SliceLayout(1, layout))
     element = gl.arange(0, 8, layout=gl.SliceLayout(0, layout))
     offsets = pack[:, None] * 8 + element[None, :]
@@ -667,7 +674,9 @@ def iris_lamport_allreduce(
         # Preserve 16-byte publication stores after casting integer addresses.
         destination = gl.multiple_of(destination.to(gl.pointer_type(gl.bfloat16)), 16)
         destination += generation * stride + RANK * MAX_ELEMENTS
-        gl.amd.cdna4.buffer_store(local, destination, offsets, mask=mask, cache=".wt")
+        gl.amd.cdna4.buffer_store(
+            local, destination, offsets, mask=mask, cache=REMOTE_STORE_CACHE
+        )
 
     peers = _iris_wait_lamport_peers(
         region_sym_ptr,
