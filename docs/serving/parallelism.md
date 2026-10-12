@@ -883,7 +883,7 @@ Cross-node groups arm the full two-shot capacity at startup. Single-node
 groups start at the one-shot window and serve larger shapes once
 model-level preparation widens the shared workspace. Other
 fan-ins and dtypes, and any shape the workspace rejects, fall back to NCCL
-(inside the trtllm backend for armed groups; the Triton all-reduce tier
+(inside the trtllm backend for armed groups; the Iris all-reduce tier
 serves AMD only, where no trtllm workspace exists). Single-node token
 all-gather/reduce-scatter runs on the Triton RSAG backend and uses NCCL
 across nodes. Logits all-gather and distributed argmax use the same
