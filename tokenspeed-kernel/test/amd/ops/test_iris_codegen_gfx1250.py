@@ -18,7 +18,7 @@
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
 
-"""Compile the generic Iris all-reduce protocols for gfx1250 without launching."""
+"""Compile the Iris all-reduce protocols for gfx1250 without launching."""
 
 import re
 
@@ -319,3 +319,64 @@ def test_iris_k3_codegen_gfx1250(kind, rank, tmp_path, monkeypatch):
         assert any(
             "s_wait_storecnt 0x0" in line for line in lines[last_store:publish]
         ), "peer stores must drain before their epoch is released"
+
+
+@pytest.mark.parametrize("world_size", (2, 4, 8))
+def test_iris_lamport_codegen_gfx1250(world_size, tmp_path):
+    """Each lane moves two 16-byte packs, and every peer read retries.
+
+    Publication goes to peers with plain stores, which reach the fabric an order
+    of magnitude faster than write-through ones on gfx1250. Only the local
+    sentinel reset keeps its cache bypass.
+    """
+    from tokenspeed_kernel._triton import gluon, triton
+    from tokenspeed_kernel.ops.communication._iris import all_reduce as ar
+
+    arch = ar.iris_arch_config(_GFX1250[0])
+    fn = ar.iris_lamport_allreduce
+    signature = {
+        name: "*i32" if name == "epochs" else "*bf16" for name in fn.arg_names[:4]
+    }
+    signature.update({name: "i64" for name in fn.arg_names[4:12]})
+    source = gluon._runtime.GluonASTSource(
+        fn,
+        signature,
+        constexprs={
+            "RANK": world_size - 1,
+            "WORLD_SIZE": world_size,
+            "TOTAL_ELEMENTS": 6 * 10752,
+            "MAX_ELEMENTS": 6 * 10752,
+            "NUM_STAGES": ar.ProducerLamport.NUM_STAGES,
+            "SUBGROUP_SIZE": arch.subgroup_size,
+            "REMOTE_STORE_CACHE": arch.remote_store_cache,
+        },
+        attrs={(index,): [["tt.divisibility", 16]] for index in range(12)},
+    )
+    kernel = triton.compile(
+        source,
+        target=triton.backends.compiler.GPUTarget("hip", *_GFX1250),
+        options={"num_warps": ar.ProducerLamport.NUM_SUBGROUPS},
+    )
+    assembly = kernel.asm["amdgcn"]
+    (tmp_path / f"lamport-ws{world_size}.amdgcn").write_text(assembly)
+    lines = assembly.splitlines()
+
+    peer_reads = 2 * (world_size - 1)
+    polls = [
+        index
+        for index, line in enumerate(lines)
+        if re.search(r"\bbuffer_load_b128\s.*SCOPE_SYS", line)
+    ]
+    assert len(polls) == peer_reads
+    cycles = _backedge_cycles(lines)
+    assert any(
+        all(start <= poll <= end for poll in polls) for start, end in cycles
+    ), "every peer read must execute again on a retry"
+    stores = [line for line in lines if re.search(r"\bbuffer_store_", line)]
+    assert all("buffer_store_b128" in line for line in stores), stores
+    resets = [line for line in stores if "th:" in line]
+    assert len(resets) == peer_reads
+    assert all("SCOPE_SYS" in line for line in resets), resets
+    # Peer publications plus this rank's output.
+    assert len(stores) - len(resets) == peer_reads + 2
+    assert re.search(r"\.amdhsa_private_segment_fixed_size\s+0\b", assembly)
