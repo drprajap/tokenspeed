@@ -376,7 +376,7 @@ class ProducerLamport:
     """Own a BF16 Lamport mailbox into which every rank pushes its local tiles."""
 
     WORLD_SIZE = 8
-    ALL_REDUCE_WORLD_SIZES = (2, 4)
+    ALL_REDUCE_WORLD_SIZES = (2, 4, 8)
     # The mailbox holds NUM_STAGES * world_size copies of the largest payload.
     ALL_REDUCE_MAX_NUMEL = 128 * 10752
     BLOCK_ELEMENTS = 512
@@ -402,8 +402,9 @@ class ProducerLamport:
     ) -> int:
         """Return the mailbox capacity generic all-reduces use, or 0 for none.
 
-        On CDNA5, Lamport outruns every flag-synchronized protocol at the
-        measured TP2 and TP4 sizes, staged or producer-direct.
+        On CDNA5 (gfx1250), Lamport outruns every flag-synchronized protocol
+        at the measured TP2, TP4 and TP8 sizes, staged or producer-direct. A
+        tray holds four GPUs, so TP8 spans two trays in one fabric domain.
         """
         if not (
             current_platform().is_cdna5
