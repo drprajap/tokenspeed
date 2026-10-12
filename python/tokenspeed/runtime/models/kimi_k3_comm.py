@@ -64,7 +64,7 @@ from tokenspeed.runtime.layers.layernorm import RMSNorm, _get_process_group
 from tokenspeed.runtime.utils.env import global_server_args_dict
 
 if TYPE_CHECKING:
-    from tokenspeed_kernel.ops.communication._iris.kimi_k3_iris import K3IrisState
+    from tokenspeed_kernel.ops.communication._iris.kimi_k3 import K3IrisState
 
 logger = logging.getLogger(__name__)
 

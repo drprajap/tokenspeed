@@ -48,7 +48,7 @@ def _require_iris():
 def test_attention_row_vector_codegen(rank, operation, has_residual, tmp_path):
     """Runtime rows must preserve vector payload traffic, including tail tiles."""
     from tokenspeed_kernel._triton import gluon, triton
-    from tokenspeed_kernel.ops.communication._iris._kimi_k3_iris.allreduce_sharded import (
+    from tokenspeed_kernel.ops.communication._iris.kimi_k3.allreduce_sharded import (
         iris_k3attn_pull_scatter,
         iris_k3attn_push_gather,
     )
@@ -138,13 +138,13 @@ def _attention_worker(rank: int, port: int) -> None:
         timeout=timedelta(seconds=180),
     )
     group = dist.new_group(backend="nccl", timeout=timedelta(seconds=180))
-    from tokenspeed_kernel.ops.communication._iris._kimi_k3_iris.allreduce_sharded import (
+    from tokenspeed_kernel.ops.communication._iris.kimi_k3 import (
+        prepare_k3_communication,
+    )
+    from tokenspeed_kernel.ops.communication._iris.kimi_k3.allreduce_sharded import (
         iris_k3attn_mix_push_gather,
         iris_k3attn_pull_scatter,
         iris_k3attn_push_gather,
-    )
-    from tokenspeed_kernel.ops.communication._iris.kimi_k3_iris import (
-        prepare_k3_communication,
     )
 
     k3_state = prepare_k3_communication(

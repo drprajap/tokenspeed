@@ -198,7 +198,7 @@ from tokenspeed.runtime.utils.cuda_stream import StreamFork
 from tokenspeed.runtime.utils.env import envs, global_server_args_dict
 
 if TYPE_CHECKING:
-    from tokenspeed_kernel.ops.communication._iris.kimi_k3_iris import K3IrisState
+    from tokenspeed_kernel.ops.communication._iris.kimi_k3 import K3IrisState
 
     from tokenspeed.runtime.execution.context import ForwardContext
     from tokenspeed.runtime.multimodal.encoder_cudagraph import (
@@ -1672,7 +1672,7 @@ def prepare_k3_all_reduce_buffers(
     if max_num_tokens <= 0:
         return False
 
-    from tokenspeed_kernel.ops.communication._iris.kimi_k3_iris import (
+    from tokenspeed_kernel.ops.communication._iris.kimi_k3 import (
         allreduce_residual_attnres_max_tokens,
         prepare_k3_communication,
     )

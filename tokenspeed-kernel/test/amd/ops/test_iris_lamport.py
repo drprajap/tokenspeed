@@ -101,7 +101,7 @@ def test_lamport_buffer_polling_codegen(rank, tmp_path):
 
 
 def _new_state(rank, device, capacity, dtype):
-    from tokenspeed_kernel.ops.communication._iris.kimi_k3_iris import (
+    from tokenspeed_kernel.ops.communication._iris.kimi_k3 import (
         prepare_k3_communication,
     )
 
