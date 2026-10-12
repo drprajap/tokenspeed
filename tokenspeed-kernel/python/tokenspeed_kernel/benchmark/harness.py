@@ -190,6 +190,7 @@ def _load_builtin_generators() -> None:
     from tokenspeed_kernel.benchmark.generators.gemm import (
         prepare_decode_gemv,
         prepare_dense_bmm,
+        prepare_grouped_bf16_projection,
         prepare_linear_attnres_partials,
         prepare_mm,
     )
@@ -214,8 +215,12 @@ def _load_builtin_generators() -> None:
         prepare_sigmoid_bias_topk,
         prepare_topk,
     )
+    from tokenspeed_kernel.benchmark.generators.quantization import (
+        prepare_fp8_with_scale,
+    )
     from tokenspeed_kernel.benchmark.generators.residual import (
         prepare_attn_res_fwd,
+        prepare_mhc_apply_pre,
         prepare_mhc_mixes,
         prepare_mhc_post,
     )
@@ -276,9 +281,15 @@ def _load_builtin_generators() -> None:
     _BENCHMARK_GENERATORS.setdefault(("residual", "attn_res_fwd"), prepare_attn_res_fwd)
     _BENCHMARK_GENERATORS.setdefault(("residual", "mhc_mixes"), prepare_mhc_mixes)
     _BENCHMARK_GENERATORS.setdefault(("residual", "mhc_post"), prepare_mhc_post)
+    _BENCHMARK_GENERATORS.setdefault(
+        ("residual", "mhc_apply_pre"), prepare_mhc_apply_pre
+    )
     _BENCHMARK_GENERATORS.setdefault(("gemm", "bmm"), prepare_dense_bmm)
     _BENCHMARK_GENERATORS.setdefault(("gemm", "mm"), prepare_mm)
     _BENCHMARK_GENERATORS.setdefault(("gemm", "decode_gemv"), prepare_decode_gemv)
+    _BENCHMARK_GENERATORS.setdefault(
+        ("gemm", "grouped_bf16_projection"), prepare_grouped_bf16_projection
+    )
     _BENCHMARK_GENERATORS.setdefault(
         ("gemm", "linear_attnres_partials"), prepare_linear_attnres_partials
     )
@@ -286,6 +297,9 @@ def _load_builtin_generators() -> None:
         ("moe", "sigmoid_bias_topk"), prepare_sigmoid_bias_topk
     )
     _BENCHMARK_GENERATORS.setdefault(("moe", "topk"), prepare_topk)
+    _BENCHMARK_GENERATORS.setdefault(
+        ("quantization", "fp8_with_scale"), prepare_fp8_with_scale
+    )
     _BENCHMARK_GENERATORS.setdefault(("moe", "apply"), prepare_moe_apply)
     _BENCHMARK_GENERATORS.setdefault(("moe", "latent_input"), prepare_latent_input)
     _BENCHMARK_GENERATORS.setdefault(
