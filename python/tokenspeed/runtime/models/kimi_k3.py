@@ -3829,24 +3829,22 @@ class KimiLinearForCausalLM(BaseCausalLM):
             max_num_tokens=max_num_tokens,
             workspaces=self.model.iris_workspaces,
         )
+        attn_workspace = self.model.iris_workspaces.get(self.mapping.attn.tp_group)
+        moe_workspace = self.model.iris_workspaces.get(self.mapping.moe.tp_ep_group)
+        moe_comm: K3MoeTailComm | None = None
         for layer in self.model.layers:
-            if isinstance(layer, KimiLinearDecoderLayer):
-                layer.k3_comm.iris_workspace = self.model.iris_workspaces.get(
-                    self.mapping.attn.tp_group
-                )
-                if layer.is_moe_layer and isinstance(
-                    layer.block_sparse_moe, KimiLinearMoE
-                ):
-                    layer.block_sparse_moe.iris_workspace = (
-                        self.model.iris_workspaces.get(self.mapping.moe.tp_ep_group)
-                    )
-        for layer in self.model.layers:
-            if not isinstance(layer, KimiLinearDecoderLayer) or not layer.is_moe_layer:
+            if not isinstance(layer, KimiLinearDecoderLayer):
+                continue
+            layer.k3_comm.iris_workspace = attn_workspace
+            if not layer.is_moe_layer:
                 continue
             moe = layer.block_sparse_moe
-            if isinstance(moe, KimiLinearMoE) and moe.comm is not None:
-                prepared = moe.comm.prepare(max_num_tokens) or prepared
-                break
+            if isinstance(moe, KimiLinearMoE):
+                moe.iris_workspace = moe_workspace
+                if moe_comm is None:
+                    moe_comm = moe.comm
+        if moe_comm is not None:
+            prepared = moe_comm.prepare(max_num_tokens) or prepared
         return bool(shared_mlps) or prepared
 
     def set_eagle3_layers_to_capture(self, layer_ids: list[int] | None = None) -> None:

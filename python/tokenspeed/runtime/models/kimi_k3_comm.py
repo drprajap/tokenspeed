@@ -113,9 +113,9 @@ def _unified_tail_applicable(
 class K3AttnComm:
     """Attention all-reduce, residual fusion, and shared workspaces for Kimi-K3.
 
-    Each decoder layer owns an instance. The first instance initializes the
-    class-level workspaces, which subsequent instances reuse. Layer-specific
-    weights are supplied to each reduction call.
+    Each decoder layer owns an instance. NVIDIA workspaces are initialized by
+    the first instance; Iris handles are bound during model preparation.
+    Layers reuse these workspaces and supply their own weights at each call.
     """
 
     _prepared_hidden_size: ClassVar[int | None] = None

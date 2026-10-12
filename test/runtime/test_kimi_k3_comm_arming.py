@@ -110,18 +110,24 @@ def test_nextn_reuses_target_iris_workspace(monkeypatch):
         value.shared_experts = SimpleNamespace(shared_parallel=None)
         return value
 
-    layer = kimi_k3.KimiLinearDecoderLayer.__new__(kimi_k3.KimiLinearDecoderLayer)
-    torch.nn.Module.__init__(layer)
-    layer.is_moe_layer = True
-    layer.block_sparse_moe = moe()
-    layer.k3_comm = K3AttnComm.__new__(K3AttnComm)
-    layer.k3_comm.iris_workspace = None
+    layers = []
+    for _ in range(3):
+        layer = kimi_k3.KimiLinearDecoderLayer.__new__(kimi_k3.KimiLinearDecoderLayer)
+        torch.nn.Module.__init__(layer)
+        layer.is_moe_layer = True
+        layer.block_sparse_moe = moe()
+        layer.k3_comm = K3AttnComm.__new__(K3AttnComm)
+        layer.k3_comm.iris_workspace = None
+        layers.append(layer)
+    prepare_tail = Mock(return_value=True)
+    for layer in layers[1:]:
+        layer.block_sparse_moe.comm = SimpleNamespace(prepare=prepare_tail)
     target = kimi_k3.KimiLinearForCausalLM.__new__(kimi_k3.KimiLinearForCausalLM)
     torch.nn.Module.__init__(target)
     target.mapping = mapping
     target.config = config
     target.model = SimpleNamespace(
-        layers=[layer], iris_workspaces=K3AttnComm.iris_workspaces
+        layers=layers, iris_workspaces=K3AttnComm.iris_workspaces
     )
 
     draft = KimiK3NextNForCausalLM.__new__(KimiK3NextNForCausalLM)
@@ -132,14 +138,17 @@ def test_nextn_reuses_target_iris_workspace(monkeypatch):
 
     assert target.prepare_communication_runtime(128)
     workspace = K3AttnComm.iris_workspaces[mapping.moe.tp_ep_group]
-    assert layer.k3_comm.iris_workspace is workspace
-    assert layer.block_sparse_moe.iris_workspace is workspace
+    for layer in layers:
+        assert layer.k3_comm.iris_workspace is workspace
+        assert layer.block_sparse_moe.iris_workspace is workspace
+    prepare_tail.assert_called_once_with(128)
     assert draft.prepare_communication_runtime(8)
     assert draft.model.decoder.block_sparse_moe.iris_workspace is workspace
     assert target.prepare_communication_runtime(128)
     assert draft.prepare_communication_runtime(4)
     assert draft.model.decoder.block_sparse_moe.iris_workspace is workspace
     assert prepare.call_count == 1
+    assert prepare_tail.call_args_list == [call(128), call(128)]
 
 
 @needs_iris
