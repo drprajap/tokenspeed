@@ -228,6 +228,25 @@ class AutoBackend(CommBackend):
         return len({rank // nprocs_per_node for rank in group}) > 1
 
     @staticmethod
+    def _iris_reachable(group: Group) -> bool:
+        """Whether an Iris heap can map every rank of ``group``.
+
+        A node-local group always can. A group spanning hosts can only on
+        CDNA5 (gfx1250) and only when every rank sits in one fabric (pod)
+        domain, where peers map each other's memory over xGMI; anything else
+        stays on NCCL's RDMA.
+        """
+        if not AutoBackend._group_spans_nodes(group):
+            return True
+        if not current_platform().is_cdna5:
+            return False
+        from tokenspeed_kernel.ops.communication.fabric import (
+            group_shares_fabric_domain,
+        )
+
+        return group_shares_fabric_domain(group)
+
+    @staticmethod
     def _multicast_reachable(group: Group) -> bool:
         """Whether symmetric-memory multicast can map across ``group``.
 
@@ -356,7 +375,7 @@ class AutoBackend(CommBackend):
             tensors = tensor
             if len(tensors) == 0:
                 raise ValueError("all-reduce requires at least one tensor")
-            use_nccl = self._force_deterministic_rsag() or self._group_spans_nodes(
+            use_nccl = self._force_deterministic_rsag() or not self._iris_reachable(
                 group
             )
             if (
@@ -394,10 +413,9 @@ class AutoBackend(CommBackend):
         # the trtllm backend then runs Tier 2 (mnnvl vs IPC, by payload bytes)
         # inside _ar_fusion_workspace.
         #   1. trtllm_ar armed for this group ...... trtllm_ar   (mnnvl / IPC fusion)
-        #   2. group spans nodes ................... NCCL
+        #   2. Iris cannot map the group ........... NCCL
         #   3. Iris can run ........................ Iris
         #   4. otherwise ........................... NCCL
-        spans_nodes = self._group_spans_nodes(group)
         # trtllm_ar carries an mnnvl workspace that spans nodes; it is only
         # armed for a group when that succeeded, so has_trtllm_ar() is itself
         # the "usable here" test. Checking it before the cross-node NCCL
@@ -405,7 +423,7 @@ class AutoBackend(CommBackend):
         # the workspace is armed and never called.
         if self._trtllm_ar.has_trtllm_ar(group):
             return self._trtllm_ar.all_reduce(tensor, group, op=op)
-        if spans_nodes:
+        if not self._iris_reachable(group):
             return self._nccl.all_reduce(tensor, group, op=op)
         if self._iris.can_run(tensor, group, op=op):
             return self._iris.all_reduce(tensor, group, op=op)
@@ -422,7 +440,7 @@ class AutoBackend(CommBackend):
             or dtype != torch.bfloat16
             or self._force_deterministic_rsag()
             or self._batch_invariant_collectives()
-            or self._group_spans_nodes(group)
+            or not self._iris_reachable(group)
             or self._trtllm_ar.has_trtllm_ar(group)
         )
 
@@ -459,7 +477,7 @@ class AutoBackend(CommBackend):
         if (
             self._force_deterministic_rsag()
             or self._batch_invariant_collectives()
-            or self._group_spans_nodes(group)
+            or not self._iris_reachable(group)
             or self._trtllm_ar.has_trtllm_ar(group)
         ):
             return False
@@ -480,7 +498,7 @@ class AutoBackend(CommBackend):
         if (
             self._force_deterministic_rsag()
             or self._batch_invariant_collectives()
-            or self._group_spans_nodes(group)
+            or not self._iris_reachable(group)
             or self._trtllm_ar.has_trtllm_ar(group)
         ):
             return super().acquire_all_reduce_outputs(shapes, like, group, op=op)

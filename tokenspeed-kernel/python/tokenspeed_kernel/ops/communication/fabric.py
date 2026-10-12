@@ -46,6 +46,7 @@ __all__ = [
     "gather_fabric_map",
     "group_has_fabric",
     "group_host_span",
+    "group_shares_fabric_domain",
 ]
 
 logger = logging.getLogger(__name__)
@@ -60,6 +61,7 @@ _CU_MEM_ALLOC_GRANULARITY_MINIMUM = 0
 _probe_cache: dict[int, bool] = {}
 _fabric_map: list[bool] | None = None
 _host_map: list[int] | None = None
+_domain_map: list[int] | None = None
 
 
 class _CUmemLocation(ctypes.Structure):
@@ -204,16 +206,45 @@ def _host_identity() -> int:
             break
     if not name:
         name = socket.gethostname()
+    return _stable_id(name)
+
+
+def _stable_id(name: str) -> int:
     digest = hashlib.blake2b(name.encode(), digest_size=8).digest()
-    # Signed 64-bit, because the gather carries it in an int64 tensor.
-    return int.from_bytes(digest, "big") >> 1
+    # Signed 64-bit and nonzero, because the gather carries it in an int64
+    # tensor and zero means "no domain".
+    return (int.from_bytes(digest, "big") >> 1) or 1
+
+
+def _amd_fabric_domain(device_index: int) -> int:
+    """This GPU's AMD fabric (pod) domain as a stable id, or 0 without one.
+
+    Iris already resolves the domain from amdsmi for its own topology map; it
+    has no public query, so this reads the same helpers. Any failure answers 0,
+    which keeps a spanning group on the RDMA backend.
+    """
+    try:
+        from iris.host.distributed import topology
+    except ImportError:
+        return 0
+    try:
+        bus_id = topology._get_pci_bus_id(device_index, "amd")
+        key = topology._amd_get_gpu_fabric_info(
+            device_index, pci_bus_id=bus_id
+        ).domain_key
+    except Exception as exc:
+        logger.info(f"AMD fabric domain query failed on device {device_index}: {exc}")
+        return 0
+    return _stable_id(key) if key else 0
 
 
 def gather_fabric_map() -> list[bool]:
     """Gather and cache every world rank's fabric-allocation verdict and host.
 
     Fabric handles are an NVIDIA concept, so off NVIDIA the answer is no for
-    every rank and is filled in without a collective. Deciding that here rather
+    every rank. CDNA5 (gfx1250) still gathers hosts and, across hosts, fabric
+    domains (see ``_gather_amd_domains``); other platforms fill the maps in
+    without a collective. Deciding that here rather
     than at the call site keeps the collective out of a lazy path: a caller
     that skipped this on the wrong platform would otherwise trigger the gather
     from a gate, which is the dispatch-time collective this map exists to
@@ -231,6 +262,9 @@ def gather_fabric_map() -> list[bool]:
         return _fabric_map
 
     world_size = torch.distributed.get_world_size()
+    if current_platform().is_cdna5:
+        _gather_amd_domains(world_size)
+        return _fabric_map
     if not current_platform().is_nvidia:
         # No fabric to map, so every rank is its own host and every span declines.
         _fabric_map = [False] * world_size
@@ -252,6 +286,57 @@ def gather_fabric_map() -> list[bool]:
         f"ranks across {len(set(_host_map))!s} hosts",
     )
     return _fabric_map
+
+
+def _gather_amd_domains(world_size: int) -> None:
+    """Fill the maps on CDNA5, where trays can share an xGMI fabric (pod) domain.
+
+    Fabric handles stay NVIDIA-only, so ``_fabric_map`` is all False. The
+    domain query runs only when the job spans hosts: the host gather comes
+    first, every rank sees the same result, and a single-host job never asks
+    amdsmi about pods it does not use.
+    """
+    global _fabric_map, _host_map, _domain_map
+
+    device = torch.device("cuda", torch.cuda.current_device())
+
+    def gather(value: int) -> list[int]:
+        local = torch.tensor([value], dtype=torch.int64, device=device)
+        gathered = [torch.empty_like(local) for _ in range(world_size)]
+        torch.distributed.all_gather(
+            gathered, local, group=torch.distributed.group.WORLD
+        )
+        return [int(item[0].item()) for item in gathered]
+
+    _host_map = gather(_host_identity())
+    if len(set(_host_map)) > 1:
+        _domain_map = gather(_amd_fabric_domain(device.index))
+    else:
+        _domain_map = [0] * world_size
+    _fabric_map = [False] * world_size
+    logger.info(
+        f"AMD fabric domains across {len(set(_host_map))!s} hosts: "
+        f"{len(set(_domain_map) - {0})!s} domains, "
+        f"{_domain_map.count(0)!s}/{world_size!s} ranks without one",
+    )
+
+
+def group_shares_fabric_domain(ranks: Sequence[int]) -> bool:
+    """Return whether every rank in ``ranks`` sits in one CDNA5 fabric domain.
+
+    That is what lets an Iris heap span gfx1250 trays: peers in one pod map
+    each other's memory over xGMI. Off CDNA5, and for ranks without a pod,
+    this is False. Raises if the map has not been gathered, like ``group_has_fabric``.
+    """
+    if _fabric_map is None:
+        raise RuntimeError(
+            "fabric map was never gathered; call gather_fabric_map() at "
+            "distributed initialization before any reachability gate"
+        )
+    if _domain_map is None:
+        return False
+    domains = {_domain_map[rank] for rank in ranks}
+    return len(domains) == 1 and 0 not in domains
 
 
 def group_has_fabric(ranks: Sequence[int]) -> bool:
