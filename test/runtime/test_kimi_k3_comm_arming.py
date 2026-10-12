@@ -48,7 +48,7 @@ from tokenspeed.runtime.models.kimi_k3_comm import (  # noqa: E402
 
 
 def _capture_iris_preparation(monkeypatch):
-    from tokenspeed_kernel.ops.communication import iris_kimi_k3
+    from tokenspeed_kernel.ops.communication._iris import kimi_k3_iris
 
     from tokenspeed.runtime.distributed.comm_backend.auto import AutoBackend
     from tokenspeed.runtime.models import kimi_k3
@@ -83,7 +83,7 @@ def _capture_iris_preparation(monkeypatch):
         )
 
     prepare = Mock(side_effect=allocate)
-    monkeypatch.setattr(iris_kimi_k3, "prepare_k3_communication", prepare)
+    monkeypatch.setattr(kimi_k3_iris, "prepare_k3_communication", prepare)
     return prepare
 
 

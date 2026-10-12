@@ -237,7 +237,7 @@ def _ar_worker_main(
             )
         k3 = None
         if attnres_max_numel:
-            from tokenspeed_kernel.ops.communication.iris_kimi_k3 import (
+            from tokenspeed_kernel.ops.communication._iris.kimi_k3_iris import (
                 prepare_k3_communication,
             )
 

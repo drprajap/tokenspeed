@@ -45,7 +45,7 @@ def _require_iris():
 def test_moe_gather_vector_codegen(rank, prefix_is_sharded, tmp_path):
     """Runtime row counts must retain vectorized payload loads and peer stores."""
     from tokenspeed_kernel._triton import gluon, triton
-    from tokenspeed_kernel.ops.communication._iris.allreduce_sharded import (
+    from tokenspeed_kernel.ops.communication._iris._kimi_k3_iris.allreduce_sharded import (
         iris_k3moe_push_gather,
     )
 
@@ -106,14 +106,14 @@ def _moe_tail_worker(rank: int, port: int) -> None:
 
 
 def _check_moe_tail(rank: int, device: torch.device, group: dist.ProcessGroup) -> None:
-    from tokenspeed_kernel.ops.communication._iris.allreduce_sharded import (
+    from tokenspeed_kernel.ops.communication._iris._kimi_k3_iris.allreduce_sharded import (
         iris_k3moe_pull_scatter,
         iris_k3moe_push_gather,
     )
-    from tokenspeed_kernel.ops.communication.iris import create_iris_ar_rmsnorm_state
-    from tokenspeed_kernel.ops.communication.iris_kimi_k3 import (
+    from tokenspeed_kernel.ops.communication._iris.kimi_k3_iris import (
         prepare_k3_communication,
     )
+    from tokenspeed_kernel.ops.communication.iris import create_iris_ar_rmsnorm_state
     from tokenspeed_kernel.ops.gemm.kimi3 import kimi3_latent_projection_add3
     from tokenspeed_kernel.ops.layernorm.triton import rmsnorm
 

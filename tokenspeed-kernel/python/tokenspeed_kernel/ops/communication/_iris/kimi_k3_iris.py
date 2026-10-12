@@ -52,13 +52,13 @@ class K3IrisState:
         enable_lamport: bool,
         sharded_max_rows: int,
     ):
-        from tokenspeed_kernel.ops.communication._iris.all_reduce import ProducerLamport
-        from tokenspeed_kernel.ops.communication._iris.allreduce_sharded import (
+        from tokenspeed_kernel.ops.communication._iris._kimi_k3_iris.allreduce_sharded import (
             IrisAllReduceShardedState,
         )
-        from tokenspeed_kernel.ops.communication._iris.attnres import (
+        from tokenspeed_kernel.ops.communication._iris._kimi_k3_iris.attnres import (
             IrisAttnResState,
         )
+        from tokenspeed_kernel.ops.communication._iris.all_reduce import ProducerLamport
 
         self.all_reduce = all_reduce
         self.enable_lamport = enable_lamport
@@ -174,7 +174,9 @@ class K3IrisState:
         scratch: tuple[torch.Tensor, torch.Tensor, torch.Tensor],
     ) -> bool:
         """Check the prepared fused AttnRes contract without allocating."""
-        from tokenspeed_kernel.ops.communication._iris.attnres import attnres_supported
+        from tokenspeed_kernel.ops.communication._iris._kimi_k3_iris.attnres import (
+            attnres_supported,
+        )
 
         return (
             self.attnres is not None
@@ -235,11 +237,13 @@ def prepare_k3_communication(
         IrisGroup,
         reserve_heap,
     )
-    from tokenspeed_kernel.ops.communication._iris.all_reduce import ProducerLamport
-    from tokenspeed_kernel.ops.communication._iris.allreduce_sharded import (
+    from tokenspeed_kernel.ops.communication._iris._kimi_k3_iris.allreduce_sharded import (
         IrisAllReduceShardedState,
     )
-    from tokenspeed_kernel.ops.communication._iris.attnres import IrisAttnResState
+    from tokenspeed_kernel.ops.communication._iris._kimi_k3_iris.attnres import (
+        IrisAttnResState,
+    )
+    from tokenspeed_kernel.ops.communication._iris.all_reduce import ProducerLamport
     from tokenspeed_kernel.ops.communication.iris import IrisAllReduce
 
     world_size = group.size()

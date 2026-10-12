@@ -24,6 +24,10 @@ prepared variants using the existing shape and topology policies. Different
 staging geometries have separate synchronization buffers because their workgroup
 IDs cover different element ranges. Triton RSAG remains independent.
 
+K3 preparation and dispatch live in `kimi_k3_iris.py`; its fused kernels and
+states live in `_kimi_k3_iris/`. General all-reduce implementations remain in
+`all_reduce.py`, separate from K3's shapes and fusion policies.
+
 Configure the allocator and optional heap capacity on every rank before the
 first preparation:
 
