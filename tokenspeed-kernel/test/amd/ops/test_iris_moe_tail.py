@@ -393,7 +393,7 @@ def _check_moe_tail(rank: int, device: torch.device, group: dist.ProcessGroup) -
         other = acquire((1, 48, 520)[iteration % 3])
         for tensor in other:
             tensor.fill_(rank + 1)
-        ordinary_snapshots.extend(state.all_reduce_symmetric(other))
+        ordinary_snapshots.extend(workspace.reduce_moe(other))
     torch.cuda.synchronize()
     for scale, output in snapshots:
         torch.testing.assert_close(
