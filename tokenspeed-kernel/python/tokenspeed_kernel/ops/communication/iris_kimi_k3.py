@@ -39,8 +39,8 @@ class K3IrisWorkspace:
     """Retain one group's all-reduce and its optional K3 fusion storage.
 
     Producers, attention mixing, and the MoE tail use these buffers in stream
-    order. The activation returned by a sharded fusion is borrowed until the
-    next fusion; its local residual shard remains caller-owned.
+    order. A sharded activation is a view of workspace storage overwritten by
+    the next fusion; its local residual shard remains caller-owned.
     """
 
     def __init__(

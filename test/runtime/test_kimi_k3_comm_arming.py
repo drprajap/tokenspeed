@@ -175,7 +175,7 @@ def test_iris_preparation_caps_attnres_for_equal_tp8_groups(
     )
     prepare.assert_called_once_with(
         group=group,
-        staged_max_numel=min(max_rows * 7168, 262144),
+        staged_max_numel=min(max_rows * 7168, 512 * 1024 // torch.bfloat16.itemsize),
         producer_direct_max_numel=min(max_rows, 8192) * (7168 + 3584),
         attnres_max_numel=16 * 7168,
         attnres_max_rows=16,
@@ -216,7 +216,7 @@ def test_iris_preparation_handles_distinct_groups(monkeypatch):
     assert prepare.call_args_list == [
         call(
             group=attn_group,
-            staged_max_numel=262144,
+            staged_max_numel=min(8192 * 7168, 512 * 1024 // torch.bfloat16.itemsize),
             producer_direct_max_numel=0,
             attnres_max_numel=0,
             attnres_max_rows=0,
@@ -229,7 +229,7 @@ def test_iris_preparation_handles_distinct_groups(monkeypatch):
         ),
         call(
             group=moe_group,
-            staged_max_numel=262144,
+            staged_max_numel=min(8192 * 7168, 512 * 1024 // torch.bfloat16.itemsize),
             producer_direct_max_numel=48 * (7168 + 3584),
             attnres_max_numel=0,
             attnres_max_rows=0,
@@ -270,7 +270,7 @@ def test_iris_preparation_handles_moe_only_group(monkeypatch):
     )
     prepare.assert_called_once_with(
         group=moe_group,
-        staged_max_numel=262144,
+        staged_max_numel=min(8192 * 7168, 512 * 1024 // torch.bfloat16.itemsize),
         producer_direct_max_numel=48 * (7168 + 3584),
         attnres_max_numel=0,
         attnres_max_rows=0,
@@ -309,7 +309,7 @@ def test_iris_preparation_keeps_baseline_window_for_equal_tp4(monkeypatch):
     )
     prepare.assert_called_once_with(
         group=group,
-        staged_max_numel=262144,
+        staged_max_numel=min(8192 * 7168, 512 * 1024 // torch.bfloat16.itemsize),
         producer_direct_max_numel=48 * (7168 + 3584),
         attnres_max_numel=0,
         attnres_max_rows=0,

@@ -21,8 +21,8 @@
 
 """Prepared Iris collectives sharing one context and stable symmetric storage.
 
-The runtime owns one all-reduce state per group and dtype. Each protocol owns
-its epochs and scratch; model-specific fusions borrow those buffers explicitly.
+Prepared operations retain their buffers and GPU synchronization counters.
+Fusions can explicitly reuse those buffers when their execution is ordered.
 """
 
 import logging
@@ -233,7 +233,7 @@ class IrisAllReduce:
     def acquire_outputs(
         self, shapes: tuple[tuple[int, ...], ...]
     ) -> tuple[torch.Tensor, ...]:
-        """Borrow consecutive symmetric views until the next ordered producer use."""
+        """Return symmetric views whose contents the next producer use overwrites."""
         assert self.producer is not None
         return self.producer.acquire(shapes)
 
