@@ -545,7 +545,7 @@ def _overlaps(tensor: torch.Tensor, buffer: torch.Tensor) -> bool:
     )
 
 
-class IrisAllReduceShardedWorkspace:
+class IrisAllReduceShardedState:
     """Own the shared result and borrow the producer input, scratch, and entry flags.
 
     Attention and MoE use these buffers in order on one stream. Their matching

@@ -83,7 +83,7 @@ class AttnResTests(unittest.TestCase):
 
         group = object()
         comm = kimi_k3_comm.K3AttnComm.__new__(kimi_k3_comm.K3AttnComm)
-        comm.iris_workspace = SimpleNamespace(
+        comm.iris_state = SimpleNamespace(
             attnres_supported=mock.Mock(), attnres_combine=mock.Mock()
         )
         comm.attn_ar_fusion_ok = False
@@ -104,12 +104,12 @@ class AttnResTests(unittest.TestCase):
         with (
             mock.patch.object(kimi_k3_comm, "_get_process_group", return_value=group),
             mock.patch.object(
-                comm.iris_workspace,
+                comm.iris_state,
                 "attnres_supported",
                 return_value=True,
             ) as supported,
             mock.patch.object(
-                comm.iris_workspace,
+                comm.iris_state,
                 "attnres_combine",
                 return_value=(expected_h, expected_residual),
             ) as fused,
@@ -136,7 +136,7 @@ class AttnResTests(unittest.TestCase):
 
         group = object()
         comm = kimi_k3_comm.K3AttnComm.__new__(kimi_k3_comm.K3AttnComm)
-        comm.iris_workspace = SimpleNamespace(
+        comm.iris_state = SimpleNamespace(
             attnres_supported=mock.Mock(), attnres_combine=mock.Mock()
         )
         comm.attn_ar_fusion_ok = False
@@ -159,7 +159,7 @@ class AttnResTests(unittest.TestCase):
         with (
             mock.patch.object(kimi_k3_comm, "_get_process_group", return_value=group),
             mock.patch.object(
-                comm.iris_workspace,
+                comm.iris_state,
                 "attnres_supported",
                 side_effect=lambda partial, *_args, **_kwargs: partial.shape[0] <= 16,
             ) as supported,
@@ -194,13 +194,13 @@ class AttnResTests(unittest.TestCase):
             _EPS,
         )
 
-        workspace = SimpleNamespace(attnres_supported=mock.Mock())
+        state = SimpleNamespace(attnres_supported=mock.Mock())
         with (
             mock.patch.object(
                 kimi_k3_comm, "_get_process_group", return_value=object()
             ),
             mock.patch.object(
-                workspace,
+                state,
                 "attnres_supported",
                 side_effect=lambda partial, *_args, **_kwargs: partial.shape[0] <= 16,
             ) as supported,
@@ -216,7 +216,7 @@ class AttnResTests(unittest.TestCase):
                         dtype=torch.bfloat16,
                     )
                     comm = kimi_k3_comm.K3AttnComm.__new__(kimi_k3_comm.K3AttnComm)
-                    comm.iris_workspace = workspace
+                    comm.iris_state = state
                     comm.mapping = SimpleNamespace(
                         nprocs_per_node=8,
                         attn=SimpleNamespace(
@@ -427,7 +427,7 @@ class AttnResTests(unittest.TestCase):
                     _prepare_next_fallback_attnres_partial=mock.Mock(),
                 )
                 layer.k3_comm = kimi_k3_comm.K3AttnComm.__new__(kimi_k3_comm.K3AttnComm)
-                layer.k3_comm.iris_workspace = None
+                layer.k3_comm.iris_state = None
                 layer.k3_comm.mapping = layer.mapping
 
                 with (

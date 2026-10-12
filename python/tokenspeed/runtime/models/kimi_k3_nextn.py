@@ -354,13 +354,11 @@ class KimiK3NextNForCausalLM(nn.Module):
             hidden_size=self.config.hidden_size,
             routed_hidden_size=routed_hidden_size,
             max_num_tokens=max_num_tokens,
-            workspaces=K3AttnComm.iris_workspaces,
+            states=K3AttnComm.iris_states,
         )
         moe = self.model.decoder.block_sparse_moe
         if isinstance(moe, KimiLinearMoE):
-            moe.iris_workspace = K3AttnComm.iris_workspaces.get(
-                self.mapping.moe.tp_ep_group
-            )
+            moe.iris_state = K3AttnComm.iris_states.get(self.mapping.moe.tp_ep_group)
         return prepared
 
     def get_input_embeddings(self) -> nn.Module:

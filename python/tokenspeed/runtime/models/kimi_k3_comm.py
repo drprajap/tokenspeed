@@ -18,7 +18,7 @@
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
 
-"""Kimi-K3 communication routing and collective workspace ownership.
+"""Kimi-K3 communication routing and collective state ownership.
 
 The routed all-reduce and RMSNorm run before joining the shared-expert stream.
 The up-projection and shared all-reduce assemble the output after the join.
@@ -64,7 +64,7 @@ from tokenspeed.runtime.layers.layernorm import RMSNorm, _get_process_group
 from tokenspeed.runtime.utils.env import global_server_args_dict
 
 if TYPE_CHECKING:
-    from tokenspeed_kernel.ops.communication.iris_kimi_k3 import K3IrisWorkspace
+    from tokenspeed_kernel.ops.communication.iris_kimi_k3 import K3IrisState
 
 logger = logging.getLogger(__name__)
 
@@ -111,11 +111,11 @@ def _unified_tail_applicable(
 
 
 class K3AttnComm:
-    """Attention all-reduce, residual fusion, and shared workspaces for Kimi-K3.
+    """Attention all-reduce, residual fusion, and shared state for Kimi-K3.
 
     Each decoder layer owns an instance. NVIDIA workspaces are initialized by
-    the first instance; Iris handles are bound during model preparation.
-    Layers reuse these workspaces and supply their own weights at each call.
+    the first instance; Iris states are bound during model preparation.
+    Layers reuse this state and supply their own weights at each call.
     """
 
     _prepared_hidden_size: ClassVar[int | None] = None
@@ -123,12 +123,12 @@ class K3AttnComm:
     dummy_norm: ClassVar[RMSNorm | None] = None
     cute_ar: ClassVar[Callable | None] = None
     # Target and draft execute sequentially and share each group's fixed buffers.
-    iris_workspaces: ClassVar[dict[tuple[int, ...], K3IrisWorkspace]] = {}
+    iris_states: ClassVar[dict[tuple[int, ...], K3IrisState]] = {}
 
     def __init__(self, *, mapping, hidden_size: int) -> None:
         self.mapping = mapping
         self.hidden_size = hidden_size
-        self.iris_workspace: K3IrisWorkspace | None = None
+        self.iris_state: K3IrisState | None = None
         if self._prepared_hidden_size is not None:
             if hidden_size != self._prepared_hidden_size:
                 raise ValueError(
@@ -258,9 +258,9 @@ class K3AttnComm:
             or partial.shape[0] % 8 != 0
         ):
             return None
-        if self.iris_workspace is None:
+        if self.iris_state is None:
             return None
-        return self.iris_workspace.attention_mix(
+        return self.iris_state.attention_mix(
             partial,
             prefix,
             block_residual,
@@ -290,15 +290,12 @@ class K3AttnComm:
             "force_deterministic_rsag", False
         ) or global_server_args_dict.get("batch_invariant_collectives", False):
             return False
-        return (
-            self.iris_workspace is not None
-            and self.iris_workspace.attnres_supported(
-                partial,
-                residual,
-                score_weight,
-                output_weight,
-                scratch,
-            )
+        return self.iris_state is not None and self.iris_state.attnres_supported(
+            partial,
+            residual,
+            score_weight,
+            output_weight,
+            scratch,
         )
 
     def attn_reduce(
@@ -395,7 +392,7 @@ class K3AttnComm:
                 combine,
                 mlp_wp,
             ):
-                h, residual_out = self.iris_workspace.attnres_combine(
+                h, residual_out = self.iris_state.attnres_combine(
                     attn_partial,
                     prefix_sum,
                     mlp_wp,

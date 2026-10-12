@@ -113,7 +113,7 @@ def _make_moe(fork: _SpyFork, *, num_tokens: int) -> SimpleNamespace:
         mapping=SimpleNamespace(attn=SimpleNamespace(dp_size=1)),
         execution_plan=SimpleNamespace(use_native=False),
         native_latent_moe=None,
-        iris_workspace=None,
+        iris_state=None,
         stream_fork=fork,
         _topk_ready=None,
         routed_hidden=4,
@@ -345,7 +345,7 @@ def test_row_sharded_moe_tail_selection_and_fallback(
 
     candidate = mock.Mock(side_effect=run_tail)
     joined = mock.Mock(side_effect=reduce_partials)
-    moe.iris_workspace = SimpleNamespace(
+    moe.iris_state = SimpleNamespace(
         moe_tail=candidate,
         all_reduce=SimpleNamespace(owns_outputs=lambda tensors: producer_direct),
         reduce_moe=lambda tensors: joined(tensors, group),
@@ -486,7 +486,7 @@ def test_sharded_attention_residual_is_gathered_before_moe_fallback(
     candidate = mock.Mock(return_value=expected if accepted else None)
     gather = mock.Mock(side_effect=gather_prefix)
     joined = mock.Mock(side_effect=reduce_partials)
-    moe.iris_workspace = SimpleNamespace(
+    moe.iris_state = SimpleNamespace(
         moe_tail=candidate,
         all_reduce=SimpleNamespace(owns_outputs=lambda tensors: producer_direct),
         reduce_moe=lambda tensors: joined(tensors, group),

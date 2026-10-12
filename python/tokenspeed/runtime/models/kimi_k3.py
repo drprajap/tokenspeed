@@ -198,7 +198,7 @@ from tokenspeed.runtime.utils.cuda_stream import StreamFork
 from tokenspeed.runtime.utils.env import envs, global_server_args_dict
 
 if TYPE_CHECKING:
-    from tokenspeed_kernel.ops.communication.iris_kimi_k3 import K3IrisWorkspace
+    from tokenspeed_kernel.ops.communication.iris_kimi_k3 import K3IrisState
 
     from tokenspeed.runtime.execution.context import ForwardContext
     from tokenspeed.runtime.multimodal.encoder_cudagraph import (
@@ -1662,7 +1662,7 @@ def prepare_k3_all_reduce_buffers(
     hidden_size: int,
     routed_hidden_size: int,
     max_num_tokens: int,
-    workspaces: dict[tuple[int, ...], "K3IrisWorkspace"],
+    states: dict[tuple[int, ...], "K3IrisState"],
 ) -> bool:
     """Prepare and retain each node-local group's Iris buffers before capture."""
     if not current_platform().is_cdna4:
@@ -1700,32 +1700,32 @@ def prepare_k3_all_reduce_buffers(
         staged_max_numel = min(
             staged_max_numel, IRIS_ALL_REDUCE_MAX_BYTES // torch.bfloat16.itemsize
         )
-        workspace = workspaces.get(group)
-        if workspace is not None:
+        state = states.get(group)
+        if state is not None:
             if (
-                workspace.all_reduce.staged_max_numel < staged_max_numel
-                or workspace.all_reduce.producer_direct_max_numel
+                state.all_reduce.staged_max_numel < staged_max_numel
+                or state.all_reduce.producer_direct_max_numel
                 < producer_direct_max_numel
-                or workspace.enable_lamport != enable_lamport
+                or state.enable_lamport != enable_lamport
                 or (
                     attnres_max_rows
                     and (
-                        workspace.attnres is None
-                        or workspace.attnres.max_rows < attnres_max_rows
-                        or workspace.attnres.max_numel < attnres_max_numel
+                        state.attnres is None
+                        or state.attnres.max_rows < attnres_max_rows
+                        or state.attnres.max_numel < attnres_max_numel
                     )
                 )
                 or (
                     moe_tail_max_rows
                     and (
-                        workspace.sharded is None
-                        or workspace.sharded.output.shape[0] < moe_tail_max_rows
+                        state.sharded is None
+                        or state.sharded.output.shape[0] < moe_tail_max_rows
                     )
                 )
             ):
-                raise RuntimeError("Cannot grow a prepared K3 Iris workspace")
+                raise RuntimeError("Cannot grow a prepared K3 Iris state")
             return True
-        workspace = prepare_k3_communication(
+        state = prepare_k3_communication(
             group=_get_process_group(group),
             rank_in_group=group.index(torch.distributed.get_rank()),
             staged_max_numel=staged_max_numel,
@@ -1738,8 +1738,8 @@ def prepare_k3_all_reduce_buffers(
             device=torch.device(f"cuda:{torch.cuda.current_device()}"),
             all_reduce=backend.iris.state(group, torch.bfloat16),
         )
-        backend.iris.install(group, workspace.all_reduce)
-        workspaces[group] = workspace
+        backend.iris.install(group, state.all_reduce)
+        states[group] = state
         return True
 
     attnres_max_rows = min(
@@ -1864,7 +1864,7 @@ class KimiLinearMoE(nn.Module):
         self.config = config
         self.mapping = mapping
         self.comm: K3MoeTailComm | None = None
-        self.iris_workspace: K3IrisWorkspace | None = None
+        self.iris_state: K3IrisState | None = None
         # Decoder layers inspect this even when attention DP skips native setup.
         self.native_latent_moe: LatentMoELayer | None = None
         if mapping.attn.dp_size > 1:
@@ -2465,12 +2465,12 @@ class KimiLinearMoE(nn.Module):
             and self.mapping.moe.tp_size == 8
             and self.mapping.moe.ep_size == 1
             and self.mapping.attn.tp_group == self.mapping.moe.tp_ep_group
-            and self.iris_workspace is not None
+            and self.iris_state is not None
             and not up_proj.narrowed
             and up_proj.solution == "auto"
         ):
             norm = self.routed_expert_norm
-            output = self.iris_workspace.moe_tail(
+            output = self.iris_state.moe_tail(
                 routed,
                 shared_partial,
                 prefix_sum,
@@ -2496,10 +2496,10 @@ class KimiLinearMoE(nn.Module):
         else:
             joined = torch.cat((routed, shared_partial), dim=-1)
         reduced = (
-            self.iris_workspace.reduce_moe(joined)
+            self.iris_state.reduce_moe(joined)
             if isinstance(joined, tuple)
-            and self.iris_workspace is not None
-            and self.iris_workspace.all_reduce.owns_outputs(joined)
+            and self.iris_state is not None
+            and self.iris_state.all_reduce.owns_outputs(joined)
             else all_reduce(joined, group)
         )
         if isinstance(reduced, torch.Tensor):
@@ -3476,7 +3476,7 @@ class KimiLinearModel(nn.Module):
         self.config = config
         self.mapping = mapping
         self.quant_config = quant_config
-        self.iris_workspaces = K3AttnComm.iris_workspaces
+        self.iris_states = K3AttnComm.iris_states
 
         # Agree on parsed sizes before any shared-expert subgroup is created.
         shared_size = envs.TOKENSPEED_KIMI_K3_SHARED_EXPERT_TP_SIZE.get()
@@ -3827,20 +3827,20 @@ class KimiLinearForCausalLM(BaseCausalLM):
             hidden_size=self.config.hidden_size,
             routed_hidden_size=routed_hidden_size,
             max_num_tokens=max_num_tokens,
-            workspaces=self.model.iris_workspaces,
+            states=self.model.iris_states,
         )
-        attn_workspace = self.model.iris_workspaces.get(self.mapping.attn.tp_group)
-        moe_workspace = self.model.iris_workspaces.get(self.mapping.moe.tp_ep_group)
+        attn_state = self.model.iris_states.get(self.mapping.attn.tp_group)
+        moe_state = self.model.iris_states.get(self.mapping.moe.tp_ep_group)
         moe_comm: K3MoeTailComm | None = None
         for layer in self.model.layers:
             if not isinstance(layer, KimiLinearDecoderLayer):
                 continue
-            layer.k3_comm.iris_workspace = attn_workspace
+            layer.k3_comm.iris_state = attn_state
             if not layer.is_moe_layer:
                 continue
             moe = layer.block_sparse_moe
             if isinstance(moe, KimiLinearMoE):
-                moe.iris_workspace = moe_workspace
+                moe.iris_state = moe_state
                 if moe_comm is None:
                     moe_comm = moe.comm
         if moe_comm is not None:

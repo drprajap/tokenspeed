@@ -35,11 +35,11 @@ def allreduce_residual_attnres_max_tokens(world_size: int) -> int:
     return 16 if current_platform().is_cdna4 and world_size == 8 else 0
 
 
-class K3IrisWorkspace:
+class K3IrisState:
     """Retain one group's all-reduce and its optional K3 fusion storage.
 
     Producers, attention mixing, and the MoE tail use these buffers in stream
-    order. A sharded activation is a view of workspace storage overwritten by
+    order. A sharded activation is a view of state storage overwritten by
     the next fusion; its local residual shard remains caller-owned.
     """
 
@@ -54,16 +54,16 @@ class K3IrisWorkspace:
     ):
         from tokenspeed_kernel.ops.communication._iris.all_reduce import ProducerLamport
         from tokenspeed_kernel.ops.communication._iris.allreduce_sharded import (
-            IrisAllReduceShardedWorkspace,
+            IrisAllReduceShardedState,
         )
         from tokenspeed_kernel.ops.communication._iris.attnres import (
-            IrisAttnResWorkspace,
+            IrisAttnResState,
         )
 
         self.all_reduce = all_reduce
         self.enable_lamport = enable_lamport
         self.attnres = (
-            IrisAttnResWorkspace(
+            IrisAttnResState(
                 all_reduce.peers, attnres_max_numel, attnres_max_rows, all_reduce.dtype
             )
             if attnres_max_numel
@@ -84,7 +84,7 @@ class K3IrisWorkspace:
             else None
         )
         self.sharded = (
-            IrisAllReduceShardedWorkspace(
+            IrisAllReduceShardedState(
                 all_reduce.producer_pull, max_rows=sharded_max_rows
             )
             if sharded_max_rows
@@ -222,12 +222,12 @@ def prepare_k3_communication(
     dtype: torch.dtype,
     device: torch.device,
     all_reduce: "IrisAllReduce | None",
-) -> K3IrisWorkspace:
+) -> K3IrisState:
     """Reserve and create a group's combined K3 buffers before graph capture.
 
     Capacities are elements except the explicitly named row capacities. Zero
     omits that path. ``all_reduce`` shares an already prepared generic operation,
-    or None creates it. The returned workspace owns all model-specific storage.
+    or None creates it. The returned state owns all model-specific storage.
     """
     from tokenspeed_kernel.ops.communication._iris import (
         HEAP_HEADROOM_BYTES,
@@ -237,9 +237,9 @@ def prepare_k3_communication(
     )
     from tokenspeed_kernel.ops.communication._iris.all_reduce import ProducerLamport
     from tokenspeed_kernel.ops.communication._iris.allreduce_sharded import (
-        IrisAllReduceShardedWorkspace,
+        IrisAllReduceShardedState,
     )
-    from tokenspeed_kernel.ops.communication._iris.attnres import IrisAttnResWorkspace
+    from tokenspeed_kernel.ops.communication._iris.attnres import IrisAttnResState
     from tokenspeed_kernel.ops.communication.iris import IrisAllReduce
 
     world_size = group.size()
@@ -272,7 +272,7 @@ def prepare_k3_communication(
             )
         producer_direct_max_numel = all_reduce.producer_direct_max_numel
     if sharded_max_rows:
-        IrisAllReduceShardedWorkspace.validate_capacity(
+        IrisAllReduceShardedState.validate_capacity(
             sharded_max_rows, world_size, dtype, producer_direct_max_numel
         )
     total_bytes = (
@@ -283,7 +283,7 @@ def prepare_k3_communication(
         else 0
     )
     if attnres_max_numel:
-        total_bytes += IrisAttnResWorkspace.heap_bytes(
+        total_bytes += IrisAttnResState.heap_bytes(
             attnres_max_numel, attnres_max_rows, world_size, dtype
         )
     if enable_lamport and ProducerLamport.supported(world_size, dtype):
@@ -293,7 +293,7 @@ def prepare_k3_communication(
         if lamport_numel:
             total_bytes += ProducerLamport.heap_bytes(lamport_numel)
     sharded_bytes = (
-        IrisAllReduceShardedWorkspace.heap_bytes(sharded_max_rows, world_size, dtype)
+        IrisAllReduceShardedState.heap_bytes(sharded_max_rows, world_size, dtype)
         if sharded_max_rows
         else 0
     )
@@ -310,7 +310,7 @@ def prepare_k3_communication(
             producer_direct_max_numel,
             dtype,
         )
-    workspace = K3IrisWorkspace(
+    state = K3IrisState(
         all_reduce,
         attnres_max_numel=attnres_max_numel,
         attnres_max_rows=attnres_max_rows,
@@ -318,4 +318,4 @@ def prepare_k3_communication(
         sharded_max_rows=sharded_max_rows,
     )
     all_reduce.peers.finish_prepare()
-    return workspace
+    return state

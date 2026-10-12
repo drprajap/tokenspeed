@@ -47,7 +47,7 @@ def attnres_supported(
     world_size: int,
     device: torch.device,
 ) -> bool:
-    """Check the fused tensor contract without allocating a workspace."""
+    """Check the fused tensor contract without allocating a state."""
     m, s, acc = scratch
     rows = partial.shape[0] if partial.ndim == 2 else 0
     hidden = ATTNRES_HIDDEN_SIZE
@@ -72,7 +72,7 @@ def attnres_supported(
     )
 
 
-class IrisAttnResWorkspace:
+class IrisAttnResState:
     """Own the push inbox, per-row generations, and AttnRes launch contract."""
 
     @staticmethod

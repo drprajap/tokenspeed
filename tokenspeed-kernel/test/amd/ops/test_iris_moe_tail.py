@@ -117,7 +117,7 @@ def _check_moe_tail(rank: int, device: torch.device, group: dist.ProcessGroup) -
     from tokenspeed_kernel.ops.gemm.kimi3 import kimi3_latent_projection_add3
     from tokenspeed_kernel.ops.layernorm.triton import rmsnorm
 
-    workspace = prepare_k3_communication(
+    k3_state = prepare_k3_communication(
         group=group,
         rank_in_group=rank,
         staged_max_numel=0,
@@ -130,8 +130,8 @@ def _check_moe_tail(rank: int, device: torch.device, group: dist.ProcessGroup) -
         device=device,
         all_reduce=None,
     )
-    state = workspace.all_reduce
-    sharded = workspace.sharded
+    state = k3_state.all_reduce
+    sharded = k3_state.sharded
     # Check that the shared heap still has room for EAGLE3's reduction state.
     rmsnorm_state = create_iris_ar_rmsnorm_state(
         group=group,
@@ -194,7 +194,7 @@ def _check_moe_tail(rank: int, device: torch.device, group: dist.ProcessGroup) -
                     iris_k3moe_push_gather,
                 ):
                     stack.enter_context(assert_no_triton_compile(kernel))
-            output = workspace.moe_tail(
+            output = k3_state.moe_tail(
                 *inputs,
                 prefix,
                 weight,
@@ -315,7 +315,7 @@ def _check_moe_tail(rank: int, device: torch.device, group: dist.ProcessGroup) -
     ]
     for routed, shared, residual, norm_weight, eps in unsupported:
         assert (
-            workspace.moe_tail(
+            k3_state.moe_tail(
                 routed,
                 shared,
                 residual,
@@ -337,7 +337,7 @@ def _check_moe_tail(rank: int, device: torch.device, group: dist.ProcessGroup) -
     )
     for residual, projection, norm_weight in invalid_aliases:
         assert (
-            workspace.moe_tail(
+            k3_state.moe_tail(
                 *inputs,
                 residual,
                 projection,
@@ -351,7 +351,7 @@ def _check_moe_tail(rank: int, device: torch.device, group: dist.ProcessGroup) -
     # owner's push before this rank consumes it, even at the exact base pointer.
     for first_row in (0, rank * (848 // 8)):
         assert (
-            workspace.moe_tail(
+            k3_state.moe_tail(
                 *inputs,
                 result_buffer[first_row : first_row + 848 // 8],
                 weight,
@@ -393,7 +393,7 @@ def _check_moe_tail(rank: int, device: torch.device, group: dist.ProcessGroup) -
         other = acquire((1, 48, 520)[iteration % 3])
         for tensor in other:
             tensor.fill_(rank + 1)
-        ordinary_snapshots.extend(workspace.reduce_moe(other))
+        ordinary_snapshots.extend(k3_state.reduce_moe(other))
     torch.cuda.synchronize()
     for scale, output in snapshots:
         torch.testing.assert_close(

@@ -88,7 +88,7 @@ def _capture_iris_preparation(monkeypatch):
 
 
 @needs_iris
-def test_nextn_reuses_target_iris_workspace(monkeypatch):
+def test_nextn_reuses_target_iris_state(monkeypatch):
     from tokenspeed.runtime.distributed.mapping import Mapping
     from tokenspeed.runtime.models import kimi_k3
     from tokenspeed.runtime.models.kimi_k3_comm import K3AttnComm
@@ -98,14 +98,14 @@ def test_nextn_reuses_target_iris_workspace(monkeypatch):
     monkeypatch.setattr(
         kimi_k3, "current_platform", lambda: SimpleNamespace(is_cdna4=True)
     )
-    monkeypatch.setattr(K3AttnComm, "iris_workspaces", {})
+    monkeypatch.setattr(K3AttnComm, "iris_states", {})
     mapping = Mapping(rank=0, world_size=8, attn_tp_size=8, moe_tp_size=8)
     config = SimpleNamespace(hidden_size=7168, routed_expert_hidden_size=3584)
 
     def moe():
         value = kimi_k3.KimiLinearMoE.__new__(kimi_k3.KimiLinearMoE)
         torch.nn.Module.__init__(value)
-        value.iris_workspace = None
+        value.iris_state = None
         value.comm = None
         value.shared_experts = SimpleNamespace(shared_parallel=None)
         return value
@@ -117,7 +117,7 @@ def test_nextn_reuses_target_iris_workspace(monkeypatch):
         layer.is_moe_layer = True
         layer.block_sparse_moe = moe()
         layer.k3_comm = K3AttnComm.__new__(K3AttnComm)
-        layer.k3_comm.iris_workspace = None
+        layer.k3_comm.iris_state = None
         layers.append(layer)
     prepare_tail = Mock(return_value=True)
     for layer in layers[1:]:
@@ -126,9 +126,7 @@ def test_nextn_reuses_target_iris_workspace(monkeypatch):
     torch.nn.Module.__init__(target)
     target.mapping = mapping
     target.config = config
-    target.model = SimpleNamespace(
-        layers=layers, iris_workspaces=K3AttnComm.iris_workspaces
-    )
+    target.model = SimpleNamespace(layers=layers, iris_states=K3AttnComm.iris_states)
 
     draft = KimiK3NextNForCausalLM.__new__(KimiK3NextNForCausalLM)
     torch.nn.Module.__init__(draft)
@@ -137,16 +135,16 @@ def test_nextn_reuses_target_iris_workspace(monkeypatch):
     draft.model = SimpleNamespace(decoder=SimpleNamespace(block_sparse_moe=moe()))
 
     assert target.prepare_communication_runtime(128)
-    workspace = K3AttnComm.iris_workspaces[mapping.moe.tp_ep_group]
+    state = K3AttnComm.iris_states[mapping.moe.tp_ep_group]
     for layer in layers:
-        assert layer.k3_comm.iris_workspace is workspace
-        assert layer.block_sparse_moe.iris_workspace is workspace
+        assert layer.k3_comm.iris_state is state
+        assert layer.block_sparse_moe.iris_state is state
     prepare_tail.assert_called_once_with(128)
     assert draft.prepare_communication_runtime(8)
-    assert draft.model.decoder.block_sparse_moe.iris_workspace is workspace
+    assert draft.model.decoder.block_sparse_moe.iris_state is state
     assert target.prepare_communication_runtime(128)
     assert draft.prepare_communication_runtime(4)
-    assert draft.model.decoder.block_sparse_moe.iris_workspace is workspace
+    assert draft.model.decoder.block_sparse_moe.iris_state is state
     assert prepare.call_count == 1
     assert prepare_tail.call_args_list == [call(128), call(128)]
 
@@ -180,7 +178,7 @@ def test_iris_preparation_caps_attnres_for_equal_tp8_groups(
         hidden_size=7168,
         routed_hidden_size=3584,
         max_num_tokens=max_rows,
-        workspaces={},
+        states={},
     )
     prepare.assert_called_once_with(
         group=group,
@@ -220,7 +218,7 @@ def test_iris_preparation_handles_distinct_groups(monkeypatch):
         hidden_size=7168,
         routed_hidden_size=3584,
         max_num_tokens=8192,
-        workspaces={},
+        states={},
     )
     assert prepare.call_args_list == [
         call(
@@ -275,7 +273,7 @@ def test_iris_preparation_handles_moe_only_group(monkeypatch):
         hidden_size=7168,
         routed_hidden_size=3584,
         max_num_tokens=8192,
-        workspaces={},
+        states={},
     )
     prepare.assert_called_once_with(
         group=moe_group,
@@ -314,7 +312,7 @@ def test_iris_preparation_keeps_baseline_window_for_equal_tp4(monkeypatch):
         hidden_size=7168,
         routed_hidden_size=3584,
         max_num_tokens=8192,
-        workspaces={},
+        states={},
     )
     prepare.assert_called_once_with(
         group=group,
@@ -370,7 +368,7 @@ def test_iris_lamport_requires_attention_and_moe_tp8(
             hidden_size=7168,
             routed_hidden_size=3584,
             max_num_tokens=8,
-            workspaces={},
+            states={},
         )
 
         assert prepare.called
@@ -416,7 +414,7 @@ def test_the_collective_is_what_serves_an_eligible_reduce():
     collective = Mock(return_value=(reduced, "shared"))
     vendor = Mock(return_value=(None, "vendor-residual", None))
     comm = K3AttnComm.__new__(K3AttnComm)
-    comm.iris_workspace = None
+    comm.iris_state = None
     comm.cute_ar = collective
     comm.dummy_norm = SimpleNamespace(
         weight="gamma", forward_with_allreduce_fusion=vendor
@@ -545,7 +543,7 @@ def test_attention_producer_window(monkeypatch, rows, eligible):
         moe=SimpleNamespace(tp_size=8, ep_size=1, tp_ep_group=group),
     )
     comm = module.K3AttnComm.__new__(module.K3AttnComm)
-    comm.iris_workspace = None
+    comm.iris_state = None
     comm.mapping = mapping
     like = torch.empty((rows, 7168), dtype=torch.bfloat16)
     projection = SimpleNamespace(
@@ -590,14 +588,14 @@ def test_attention_mix_window(monkeypatch, rows, is_cdna4, eligible):
 
     group = tuple(range(8))
     comm = module.K3AttnComm.__new__(module.K3AttnComm)
-    comm.iris_workspace = None
+    comm.iris_state = None
     comm.mapping = SimpleNamespace(attn=SimpleNamespace(tp_group=group))
     partial = torch.empty((rows, 7168), dtype=torch.bfloat16, device="meta")
     history = torch.empty((4, rows, 7168), dtype=torch.bfloat16, device="meta")
     weight = torch.empty((7168,), dtype=torch.bfloat16, device="meta")
     expected = (object(), object())
     operation = Mock(return_value=expected)
-    comm.iris_workspace = SimpleNamespace(attention_mix=operation)
+    comm.iris_state = SimpleNamespace(attention_mix=operation)
     monkeypatch.setattr(
         module, "current_platform", lambda: SimpleNamespace(is_cdna4=is_cdna4)
     )

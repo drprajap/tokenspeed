@@ -147,7 +147,7 @@ def _attention_worker(rank: int, port: int) -> None:
         prepare_k3_communication,
     )
 
-    workspace = prepare_k3_communication(
+    k3_state = prepare_k3_communication(
         group=group,
         rank_in_group=rank,
         staged_max_numel=0,
@@ -160,8 +160,8 @@ def _attention_worker(rank: int, port: int) -> None:
         device=device,
         all_reduce=None,
     )
-    state = workspace.all_reduce
-    sharded = workspace.sharded
+    state = k3_state.all_reduce
+    sharded = k3_state.sharded
     buffers = (
         state.producer.data,
         state.producer_pull.scratch,
@@ -251,7 +251,7 @@ def _attention_worker(rank: int, port: int) -> None:
                             iris_k3attn_mix_push_gather,
                         ):
                             stack.enter_context(assert_no_triton_compile(kernel))
-                    mixed = workspace.attention_mix(
+                    mixed = k3_state.attention_mix(
                         partial,
                         prefix,
                         history,
@@ -289,7 +289,7 @@ def _attention_worker(rank: int, port: int) -> None:
                     small_graph = torch.cuda.CUDAGraph()
                     with torch.cuda.graph(small_graph):
                         partial.copy_(source)
-                        captured = workspace.attention_mix(
+                        captured = k3_state.attention_mix(
                             partial,
                             prefix,
                             history,
@@ -329,7 +329,7 @@ def _attention_worker(rank: int, port: int) -> None:
                 dist.barrier()
                 flags_before = state.producer_pull.ready_flags.clone()
                 assert (
-                    workspace.attention_mix(
+                    k3_state.attention_mix(
                         partial,
                         prefix,
                         history,
@@ -371,7 +371,7 @@ def _attention_worker(rank: int, port: int) -> None:
         (partial.as_strided(partial.shape, (1, m)), None),
     ):
         assert (
-            workspace.attention_mix(
+            k3_state.attention_mix(
                 operand,
                 prefix,
                 history,
@@ -391,7 +391,7 @@ def _attention_worker(rank: int, port: int) -> None:
     # before publishing an entry flag, even when there is no history to read.
     oversized = state.acquire_outputs(((8200, 7168),))[0]
     assert (
-        workspace.attention_mix(
+        k3_state.attention_mix(
             oversized,
             None,
             oversized.new_empty((0, 8200, 7168)),
@@ -416,7 +416,7 @@ def _attention_worker(rank: int, port: int) -> None:
         (history, score, float("nan")),
     ):
         assert (
-            workspace.attention_mix(
+            k3_state.attention_mix(
                 partial,
                 residual,
                 blocks,
@@ -448,7 +448,7 @@ def _attention_worker(rank: int, port: int) -> None:
     stored_residual = sharded.output[:m]
     stored_residual.copy_(residual)
     partial.copy_(source)
-    alias_result = workspace.attention_mix(
+    alias_result = k3_state.attention_mix(
         partial,
         stored_residual,
         history,
@@ -473,7 +473,7 @@ def _attention_worker(rank: int, port: int) -> None:
     inputs = state.acquire_outputs(((m, 3584), (m, 7168)))
     for out, value in zip(inputs, moe_sources, strict=True):
         out.copy_(value)
-    expected_moe = workspace.moe_tail(
+    expected_moe = k3_state.moe_tail(
         *inputs,
         moe_prefix,
         weight,
@@ -489,7 +489,7 @@ def _attention_worker(rank: int, port: int) -> None:
         partial.copy_(source)
         first = state.all_reduce_symmetric((partial,))[0].clone() + residual
         partial.copy_(source)
-        mixed = workspace.attention_mix(
+        mixed = k3_state.attention_mix(
             partial,
             residual,
             history,
@@ -506,7 +506,7 @@ def _attention_worker(rank: int, port: int) -> None:
         inputs = state.acquire_outputs(((m, 3584), (m, 7168)))
         for out, value in zip(inputs, moe_sources, strict=True):
             out.copy_(value)
-        moe = workspace.moe_tail(
+        moe = k3_state.moe_tail(
             *inputs,
             shard,
             weight,
@@ -554,7 +554,7 @@ def _attention_worker(rank: int, port: int) -> None:
             expected_activation = _reference_mix(moe_prefix, history, score, norm, 8)
             for out, value in zip(inputs, moe_sources, strict=True):
                 out.copy_(value)
-            reference_moe = workspace.moe_tail(
+            reference_moe = k3_state.moe_tail(
                 *inputs,
                 moe_prefix,
                 weight,

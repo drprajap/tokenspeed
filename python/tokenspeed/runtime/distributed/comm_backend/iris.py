@@ -18,7 +18,7 @@
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
 
-"""Iris collectives with persistent, per-group symmetric workspaces."""
+"""Iris collectives with persistent, per-group symmetric states."""
 
 import math
 from typing import TYPE_CHECKING
@@ -40,7 +40,7 @@ _DEFAULT_ALL_REDUCE_MAX_BYTES = 512 * 1024
 
 
 class IrisBackend(CommBackend):
-    """Keep direct handles to the Iris workspaces prepared for each group/dtype."""
+    """Keep direct handles to the Iris states prepared for each group/dtype."""
 
     def __init__(
         self,
@@ -60,14 +60,14 @@ class IrisBackend(CommBackend):
         return self._producer_direct_max_bytes
 
     def state(self, group: Group, dtype: torch.dtype) -> "IrisAllReduce | None":
-        """Return this group's prepared all-reduce workspace without allocating."""
+        """Return this group's prepared all-reduce state without allocating."""
         return self._instances.get((group, dtype))
 
     def install(self, group: Group, state: "IrisAllReduce") -> None:
-        """Bind a workspace reserved alongside a model's fused operations."""
+        """Bind a state reserved alongside a model's fused operations."""
         previous = self.state(group, state.dtype)
         if previous is not None and previous is not state:
-            raise RuntimeError("cannot replace a prepared Iris all-reduce workspace")
+            raise RuntimeError("cannot replace a prepared Iris all-reduce state")
         self._instances[group, state.dtype] = state
 
     def _create(
@@ -236,7 +236,7 @@ class IrisBackend(CommBackend):
         group: Group,
         op=None,
     ) -> bool:
-        """Recognize producer views by ownership, without searching workspaces."""
+        """Recognize producer views by ownership, without searching states."""
         if (
             not current_platform().is_cdna4
             or op not in (None, torch.distributed.ReduceOp.SUM)

@@ -575,7 +575,7 @@ def _check_all_reduce_symmetric_outputs(
             )
 
 
-def _check_all_reduce_residual_attnres(workspace, rank: int, device) -> None:
+def _check_all_reduce_residual_attnres(k3_state, rank: int, device) -> None:
     from tokenspeed_kernel.ops.activation.triton import (
         attnres_combine,
         attnres_partial,
@@ -584,7 +584,7 @@ def _check_all_reduce_residual_attnres(workspace, rank: int, device) -> None:
         iris_all_reduce,
     )
 
-    state = workspace.all_reduce
+    state = k3_state.all_reduce
     for num_tokens in (1, 2, 4, 8, 16):
         torch.manual_seed(101 + num_tokens)
         hidden = 7168
@@ -618,7 +618,7 @@ def _check_all_reduce_residual_attnres(workspace, rank: int, device) -> None:
             scratch,
             torch.empty_like(residual),
         )
-        assert workspace.attnres_supported(
+        assert k3_state.attnres_supported(
             local,
             residual,
             score_weight,
@@ -626,7 +626,7 @@ def _check_all_reduce_residual_attnres(workspace, rank: int, device) -> None:
             scratch,
         )
         for _ in range(4):
-            actual_hidden, actual_residual = workspace.attnres_combine(
+            actual_hidden, actual_residual = k3_state.attnres_combine(
                 local,
                 residual,
                 score_weight,
@@ -644,7 +644,7 @@ def _check_all_reduce_residual_attnres(workspace, rank: int, device) -> None:
         graph = torch.cuda.CUDAGraph()
         dist.barrier()
         with torch.cuda.graph(graph):
-            graph_hidden, graph_residual = workspace.attnres_combine(
+            graph_hidden, graph_residual = k3_state.attnres_combine(
                 local,
                 residual,
                 score_weight,
