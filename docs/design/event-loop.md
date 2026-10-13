@@ -332,6 +332,16 @@ The same reasoning fixes the metrics call: the loop records scheduler
 iteration metrics once per round, from the same pre-dispatch snapshot as the
 scheduler stats.
 
+Per-request metrics anchor to request lifecycle points instead of the round
+snapshot. `tokenspeed:request_queue_time_seconds` stamps each request's
+waiting-queue entry at `_submit_scheduler_requests` — the single funnel
+normal admission, the EPD drain and the pause resume all submit through —
+and observes it once, when the request first appears in a dispatched forward
+(`_record_request_queue_time`, beside `_mark_stats_scheduled`). A retracted
+request re-enters the C++ waiting queue without passing the funnel again, so
+preemption yields no second observation. The stamp and the recorded flag
+ride `RequestState` and die with it; no cleanup pass exists.
+
 Page gauges count LCM parents, excluding the reserved null parent. The
 per-round sampler reads `empty_lcm_blocks()` and `active_lcm_blocks()`.
 Cached-only parents are `num_usable_pages - empty - active`. Active and cached
@@ -460,7 +470,15 @@ For orientation, one iteration of `event_loop`:
    completion event fences the forward thread's default stream here, before
    anything else of the plan is enqueued; an ordinary store's sources are
    pinned by the scheduler until the ACK, so its copy rides the write stream
-   and fences nothing -- then page zeroing (the new owner's sanitization),
+   and fences nothing -- then the plan's Device-to-Device block copies
+   (`pages_to_copy`: a prefix hit's private copy of the block holding its
+   boundary, an owner's move off the block it published at its prompt end;
+   the copy waits on the execution stream and precedes the zeroing because
+   a source may be re-granted and zeroed by this very plan -- or re-granted
+   as another copy's destination, which the arena then writes only after the
+   pairs reading it; a destination is never zeroed; no op id, no ACK), then
+   page zeroing (the new
+   owner's sanitization),
    then L3 prefetches (`PrefetchOp`: Host-lane submissions with no stream
    dependency, nothing in the round reads their pages), then the
    Device-bound copies -- `LoadBackOp` and `RestoreOp`, ordered
