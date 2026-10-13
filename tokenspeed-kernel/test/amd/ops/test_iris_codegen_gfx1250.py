@@ -185,3 +185,138 @@ def test_iris_all_reduce_codegen_gfx1250(kind, world_size, tmp_path):
     ), "epochs must be published with system-scope atomics"
     assert re.search(r"\.amdhsa_private_segment_fixed_size\s+0\b", assembly)
 
+
+_K3_KERNELS = {
+    "moe_pull_scatter": {"FIRST_WIDTH": 3584, "SECOND_WIDTH": 7168},
+    "moe_push_gather": {"PREFIX_IS_SHARDED": True},
+    "attn_pull_scatter": {"HAS_RESIDUAL": True},
+    "attn_push_gather": {},
+    "attn_mix_push_gather": {"NUM_VALID_BLOCKS": 3},
+    "attnres_push_oneshot": {},
+}
+
+
+def _compile_k3(kind, rank, monkeypatch):
+    from tokenspeed_kernel._triton import gluon, triton
+    from tokenspeed_kernel.ops.communication._iris import all_reduce as ar
+    from tokenspeed_kernel.ops.communication._iris.kimi_k3 import (
+        allreduce_sharded as sharded,
+    )
+    from tokenspeed_kernel.ops.communication._iris.kimi_k3 import (
+        attnres,
+    )
+    from tokenspeed_kernel_amd.ops.gfx1250.attention.kda import attn_res
+
+    arch = ar.iris_arch_config(_GFX1250[0])
+    num_warps = 4
+    constexprs = {"RANK": rank, **_K3_KERNELS[kind]}
+    if kind == "attnres_push_oneshot":
+        fn = attnres.iris_k3attn_push_oneshot
+        num_warps = 16
+        constexprs.update(
+            WORLD_SIZE=8,
+            HIDDEN=7168,
+            BLOCK=8192,
+            MAX_ELEMENTS=16 * 7168,
+            READY_SLOT_STRIDE=16 * 8,
+            EPS=1e-6,
+            ELEMENTS_PER_THREAD=8,
+            SUBGROUP_SIZE=arch.subgroup_size,
+            SPLIT_WAIT_COUNTERS=arch.split_wait_counters,
+            REMOTE_STORE_CACHE=arch.remote_store_cache,
+        )
+    else:
+        fn = getattr(sharded, f"iris_k3{kind}")
+        constexprs.update(
+            NUM_PROGRAMS=(
+                sharded.REDUCE_PROGRAMS if "pull" in kind else sharded.GATHER_PROGRAMS
+            ),
+            **arch.constexprs,
+        )
+        if kind == "attn_mix_push_gather":
+            num_warps = 8
+            monkeypatch.setattr(
+                sharded, "_attn_res_mix", attn_res._attn_res_mix_gfx1250
+            )
+            constexprs.update(STRIDE_BLOCK_T=7168, SCORE_EPS=1e-6, OUTPUT_EPS=1e-6)
+        else:
+            constexprs["BLOCK_ELEMENTS"] = 2048
+    constexprs["NUM_WARPS"] = num_warps
+    signature = {}
+    for name in fn.arg_names:
+        if name in constexprs:
+            continue
+        if name.startswith("heap_base_") or name == "STRIDE_BLOCK_N":
+            signature[name] = "i64"
+        elif name in ("ROWS", "LOCAL_ROWS"):
+            signature[name] = "i32"
+        elif name in ("ready_flags", "generations"):
+            signature[name] = "*i32"
+        elif name.startswith("scratch_") and name != "scratch_ptr":
+            signature[name] = "*fp32"
+        else:
+            signature[name] = "*bf16"
+    source = gluon._runtime.GluonASTSource(
+        fn,
+        signature,
+        constexprs=constexprs,
+        attrs=_aligned(
+            fn, {name for name, kind in signature.items() if kind.startswith("*")}
+        ),
+    )
+    return triton.compile(
+        source,
+        target=triton.backends.compiler.GPUTarget("hip", *_GFX1250),
+        options={"num_warps": num_warps},
+    )
+
+
+@pytest.mark.parametrize("rank", (0, 7))
+@pytest.mark.parametrize("kind", tuple(_K3_KERNELS))
+def test_iris_k3_codegen_gfx1250(kind, rank, tmp_path, monkeypatch):
+    """The K3 fusions build for wave32 and publish with system-scope releases.
+
+    Peer payloads move as plain 16-byte accesses, the only non-temporal loads
+    are flag polls on their retry loops, and gathers drain their peer stores
+    before the release that publishes them.
+    """
+    assembly = _compile_k3(kind, rank, monkeypatch).asm["amdgcn"]
+    (tmp_path / f"{kind}-rank{rank}.amdgcn").write_text(assembly)
+    lines = assembly.splitlines()
+    assert "vmcnt" not in assembly
+    assert re.search(r"\.amdhsa_private_segment_fixed_size\s+0\b", assembly)
+
+    loads = [line for line in lines if re.search(r"\b(global|buffer)_load_", line)]
+    non_temporal = [line for line in loads if "TH_LOAD_NT" in line]
+    assert all("SCOPE_SYS" in line for line in non_temporal), non_temporal
+    polls = [
+        index
+        for index, line in enumerate(lines)
+        if re.search(r"\b(global|buffer)_load_\w+\s.*SCOPE_SYS", line)
+    ]
+    assert polls
+    cycles = _backedge_cycles(lines)
+    assert all(
+        any(start <= poll <= end for start, end in cycles) for poll in polls
+    ), "a peer flag poll was hoisted out of its retry loop"
+
+    payload_stores = [line for line in lines if re.search(r"\bbuffer_store_", line)]
+    assert all("buffer_store_b128" in line for line in payload_stores)
+    if "push" in kind:
+        peer_stores = [line for line in payload_stores if "th:" not in line]
+        assert len(peer_stores) >= 7, payload_stores
+    if "pull" in kind:
+        assert sum("buffer_load_b128" in line for line in loads) >= 8
+    releases = [
+        index
+        for index, line in enumerate(lines)
+        if re.search(r"\bglobal_atomic_\w+.*SCOPE_SYS", line)
+    ]
+    assert releases, "epochs must be published with system-scope atomics"
+    if "push" in kind:
+        stores = [i for i, line in enumerate(lines) if "buffer_store_b128" in line]
+        publish = next(index for index in releases if index > stores[0])
+        last_store = max(index for index in stores if index < publish)
+        assert any(
+            "s_wait_storecnt 0x0" in line for line in lines[last_store:publish]
+        ), "peer stores must drain before their epoch is released"

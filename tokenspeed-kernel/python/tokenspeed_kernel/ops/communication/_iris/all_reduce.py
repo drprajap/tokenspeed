@@ -48,6 +48,8 @@ class IrisArchConfig:
 
     Attributes:
         subgroup_size: Lanes per subgroup the Gluon layouts are built for.
+        split_wait_counters: Drain loads and stores with separate counters
+            (gfx12+) instead of the combined ``vmcnt``.
         peer_load_cache: Cache modifier for loads of peer symmetric memory;
             empty selects the default.
         remote_store_cache: Cache modifier for stores into peer symmetric
@@ -55,13 +57,25 @@ class IrisArchConfig:
     """
 
     subgroup_size: int
+    split_wait_counters: bool
     peer_load_cache: str
     remote_store_cache: str
+
+    @property
+    def constexprs(self) -> dict:
+        """Keyword arguments for kernels that take every field."""
+        return {
+            "SUBGROUP_SIZE": self.subgroup_size,
+            "SPLIT_WAIT_COUNTERS": self.split_wait_counters,
+            "PEER_LOAD_CACHE": self.peer_load_cache,
+            "REMOTE_STORE_CACHE": self.remote_store_cache,
+        }
 
 
 _ARCH_CONFIGS = {
     "gfx950": IrisArchConfig(
         subgroup_size=64,
+        split_wait_counters=False,
         peer_load_cache=".cg",
         remote_store_cache=".wt",
     ),
@@ -70,6 +84,7 @@ _ARCH_CONFIGS = {
     # of magnitude slower than plain ones.
     "gfx1250": IrisArchConfig(
         subgroup_size=32,
+        split_wait_counters=True,
         peer_load_cache="",
         remote_store_cache="",
     ),
@@ -471,9 +486,13 @@ def all_reduce_heap_bytes(
 
 
 @gluon.jit
-def _iris_drain_subgroup_vmem():
+def _iris_drain_subgroup_vmem(SPLIT_WAIT_COUNTERS: gl.constexpr):
+    if SPLIT_WAIT_COUNTERS:
+        wait: gl.constexpr = "s_wait_loadcnt 0x0\n\ts_wait_storecnt 0x0"
+    else:
+        wait: gl.constexpr = "s_waitcnt vmcnt(0)"
     gl.inline_asm_elementwise(
-        "s_waitcnt vmcnt(0)",
+        wait,
         "=r,~{memory}",
         [],
         dtype=gl.int32,
@@ -757,6 +776,7 @@ def _iris_sync_rank_token(
     WORLD_SIZE: gl.constexpr,
     NUM_WARPS: gl.constexpr,
     SUBGROUP_SIZE: gl.constexpr,
+    SPLIT_WAIT_COUNTERS: gl.constexpr,
 ):
     layout: gl.constexpr = gl.BlockedLayout([1], [SUBGROUP_SIZE], [NUM_WARPS], [0])
     peers = gl.arange(0, WORLD_SIZE, layout=layout)
@@ -803,7 +823,7 @@ def _iris_sync_rank_token(
         sem="acquire",
         scope="sys",
     )
-    _iris_drain_subgroup_vmem()
+    _iris_drain_subgroup_vmem(SPLIT_WAIT_COUNTERS)
     # The acquire is subgroup-local. Keep every subgroup at the protocol
     # boundary until all of them have observed the peer publications; the
     # caller consumes the peer inbox immediately after this helper returns.
