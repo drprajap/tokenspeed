@@ -202,6 +202,9 @@ def _ar_worker_main(
     try:
         # Importing inside the worker avoids pulling iris into the parent
         # process (which has no distributed context).
+        from tokenspeed_kernel.ops.communication._iris.all_reduce import (
+            ProducerLamport,
+        )
         from tokenspeed_kernel.ops.communication.iris import (
             configure_iris,
             create_iris_state,
@@ -235,7 +238,10 @@ def _ar_worker_main(
                 state.tuned_staged.ready_flags.data_ptr()
                 != state.staged.ready_flags.data_ptr()
             )
-        if current_platform().is_cdna5 and world_size in (2, 4):
+        if (
+            current_platform().is_cdna5
+            and world_size in ProducerLamport.ALL_REDUCE_WORLD_SIZES
+        ):
             _check_lamport_dispatch(state, rank, world_size, device)
         k3 = None
         if attnres_max_numel:
