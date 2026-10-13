@@ -129,10 +129,11 @@ class TestAutoBackendTopology:
         )
         getattr(backend._nccl, method).assert_not_called()
 
-    def test_cross_node_all_reduce_falls_back_to_nccl(self, backend):
+    def test_cross_node_all_reduce_falls_back_to_nccl(self, backend, monkeypatch):
         # trtllm_ar is still consulted for a cross-node group: its mnnvl
         # workspace spans nodes, and it is only armed when that succeeded.
         # NCCL is the fallback for when it is not armed.
+        self._set_domain(monkeypatch, False)
         backend._trtllm_ar.has_trtllm_ar.return_value = False
         tensor = torch.empty(1)
         backend._nccl.all_reduce.return_value = "nccl-result"
@@ -210,12 +211,65 @@ class TestAutoBackendTopology:
     def test_host_spread_all_reduce_still_keys_on_topology(self, backend, monkeypatch):
         """Fabric governs the rsag paths only: triton_ar stays node-local."""
         self._set_fabric(monkeypatch, True)
+        self._set_domain(monkeypatch, False)
         backend._trtllm_ar.has_trtllm_ar.return_value = False
         tensor = torch.empty(1)
         backend._nccl.all_reduce.return_value = "nccl-result"
 
         assert backend.all_reduce(tensor, tuple(range(8))) == "nccl-result"
         backend._iris.can_run.assert_not_called()
+
+    @staticmethod
+    def _set_domain(monkeypatch, shared: bool) -> None:
+        import tokenspeed_kernel.ops.communication.fabric as fabric
+
+        monkeypatch.setattr(fabric, "group_shares_fabric_domain", lambda ranks: shared)
+
+    @staticmethod
+    def _set_platform(monkeypatch, name: str) -> None:
+        import tokenspeed.runtime.distributed.comm_backend.auto as auto
+
+        platform = SimpleNamespace(
+            is_amd=name != "nvidia",
+            is_cdna5=name == "cdna5",
+            is_nvidia=name == "nvidia",
+        )
+        monkeypatch.setattr(auto, "current_platform", lambda: platform)
+
+    @pytest.mark.parametrize(
+        ("platform", "shared", "reachable"),
+        [
+            ("cdna5", True, True),
+            ("cdna5", False, False),
+            ("cdna4", True, False),
+            ("nvidia", True, False),
+        ],
+        ids=["cdna5-one-domain", "cdna5-no-domain", "cdna4", "nvidia"],
+    )
+    def test_host_spread_iris_needs_one_cdna5_fabric_domain(
+        self, backend, monkeypatch, platform, shared, reachable
+    ):
+        self._set_platform(monkeypatch, platform)
+        self._set_domain(monkeypatch, shared)
+        group = tuple(range(8))
+        assert backend._iris_reachable((0, 1, 2, 3))
+        assert backend._iris_reachable(group) is reachable
+        assert backend.can_prepare_all_reduce_buffers(group, torch.bfloat16) is (
+            reachable
+        )
+
+    def test_one_fabric_domain_keeps_a_host_spread_all_reduce_on_iris(
+        self, backend, monkeypatch
+    ):
+        self._set_platform(monkeypatch, "cdna5")
+        self._set_domain(monkeypatch, True)
+        monkeypatch.setattr(backend, "route", lambda *args: None)
+        backend._iris.can_run.return_value = True
+        backend._iris.all_reduce.return_value = "iris-result"
+        tensor = torch.empty(1)
+
+        assert backend._all_reduce_one(tensor, tuple(range(8)), None) == "iris-result"
+        backend._nccl.all_reduce.assert_not_called()
 
 
 def test_fabric_map_gathers_world_once_and_serves_groups_locally(monkeypatch):
@@ -224,6 +278,11 @@ def test_fabric_map_gathers_world_once_and_serves_groups_locally(monkeypatch):
     original_tensor = torch.tensor
     original_empty_like = torch.empty_like
     monkeypatch.setattr(fabric, "_fabric_map", None)
+    monkeypatch.setattr(
+        fabric,
+        "current_platform",
+        lambda: SimpleNamespace(is_cdna5=False, is_nvidia=True),
+    )
     monkeypatch.setattr(torch.cuda, "current_device", lambda: 2)
     monkeypatch.setattr(fabric, "fabric_allocation_supported", lambda device: True)
     monkeypatch.setattr(torch.distributed, "get_world_size", lambda: 4)
@@ -242,6 +301,57 @@ def test_fabric_map_gathers_world_once_and_serves_groups_locally(monkeypatch):
     assert fabric.group_has_fabric((0, 2, 3))
     assert not fabric.group_has_fabric((0, 1))
     assert calls == [torch.distributed.group.WORLD]
+
+
+@pytest.mark.parametrize(
+    ("hosts", "domains", "shared"),
+    [
+        ((1, 1, 1, 1), None, False),
+        ((1, 1, 2, 2), (7, 7, 7, 7), True),
+        ((1, 1, 2, 2), (7, 7, 9, 9), False),
+        ((1, 1, 2, 2), (7, 7, 0, 0), False),
+    ],
+    ids=["one-host", "one-domain", "two-domains", "no-pod"],
+)
+def test_cdna5_fabric_map_gathers_domains_only_across_hosts(
+    monkeypatch, hosts, domains, shared
+):
+    import tokenspeed_kernel.ops.communication.fabric as fabric
+
+    original_tensor = torch.tensor
+    original_empty_like = torch.empty_like
+    monkeypatch.setattr(fabric, "_fabric_map", None)
+    monkeypatch.setattr(fabric, "_domain_map", None)
+    monkeypatch.setattr(fabric, "_host_map", None)
+    monkeypatch.setattr(
+        fabric, "current_platform", lambda: SimpleNamespace(is_cdna5=True)
+    )
+    monkeypatch.setattr(torch.cuda, "current_device", lambda: 0)
+    monkeypatch.setattr(torch.distributed, "get_world_size", lambda: 4)
+    queried = []
+
+    def query(device):
+        queried.append(device)
+        return 0
+
+    monkeypatch.setattr(fabric, "_amd_fabric_domain", query)
+    gathers = iter([hosts] + ([domains] if domains else []))
+
+    def fake_all_gather(outputs, local, group):
+        for output, value in zip(outputs, next(gathers), strict=True):
+            output.fill_(value)
+
+    monkeypatch.setattr(torch.distributed, "all_gather", fake_all_gather)
+    monkeypatch.setattr(torch, "tensor", lambda value, **kwargs: original_tensor(value))
+    monkeypatch.setattr(torch, "empty_like", lambda value: original_empty_like(value))
+
+    assert fabric.gather_fabric_map() == [False] * 4
+    assert next(gathers, None) is None
+    assert queried == ([0] if domains else [])
+    assert fabric.group_shares_fabric_domain(range(4)) is shared
+    assert fabric.group_shares_fabric_domain((0, 1)) is (domains is not None)
+    assert fabric.group_host_span(range(4)) == len(set(hosts))
+    assert not fabric.group_has_fabric(range(4))
 
 
 @pytest.mark.parametrize("capturing", [True, False])
