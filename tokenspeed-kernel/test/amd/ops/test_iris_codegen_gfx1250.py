@@ -227,10 +227,9 @@ def _compile_k3(kind, rank, monkeypatch):
         )
     else:
         fn = getattr(sharded, f"iris_k3{kind}")
+        reduce_programs, gather_programs = sharded._max_programs(_GFX1250[0])
         constexprs.update(
-            NUM_PROGRAMS=(
-                sharded.REDUCE_PROGRAMS if "pull" in kind else sharded.GATHER_PROGRAMS
-            ),
+            NUM_PROGRAMS=reduce_programs if "pull" in kind else gather_programs,
             **arch.constexprs,
         )
         if kind == "attn_mix_push_gather":

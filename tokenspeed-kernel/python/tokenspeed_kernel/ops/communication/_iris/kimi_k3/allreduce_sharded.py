@@ -20,21 +20,78 @@
 
 """Iris all-reduce with sharded K3 attn/MoE compute and shared result storage."""
 
+import dataclasses
 import math
 
 import torch
 from tokenspeed_kernel._triton import gl, gluon
 from tokenspeed_kernel.ops.communication._iris import allocation_bytes
 from tokenspeed_kernel.ops.communication._iris.all_reduce import (
+    _PULL_MAX_PROGRAMS,
     ProducerPull,
     _iris_drain_subgroup_vmem,
     iris_arch_config,
+    iris_arch_name,
 )
 from tokenspeed_kernel.platform import current_platform
 
-REDUCE_PROGRAMS = 24
-GATHER_PROGRAMS = 128
 _attn_res_mix = None
+
+
+@dataclasses.dataclass(frozen=True)
+class K3LaunchConfig:
+    """Grids and tiles of the row-sharded reduce and gather kernels."""
+
+    reduce_programs: int
+    reduce_block: int
+    reduce_warps: int
+    gather_programs: int
+    gather_block: int
+    gather_warps: int
+    plain_gather_programs: int
+
+
+_GFX950_LAUNCH = K3LaunchConfig(24, 2048, 4, 128, 2048, 4, 32)
+# Rows of (max rows, launch, longest AttnRes history the attention gather mixes
+# itself). The ordinary mixer is faster in the middle token range. At larger
+# sizes, longer histories also need enough rows to amortize live peer pointers.
+# gfx1250 was measured at TP8 across two MI455X trays.
+_K3_LAUNCHES = {
+    "gfx950": (
+        (1023, _GFX950_LAUNCH, 6),
+        (4095, _GFX950_LAUNCH, 0),
+        (7679, _GFX950_LAUNCH, 6),
+        (8192, _GFX950_LAUNCH, 8),
+    ),
+    "gfx1250": (
+        (256, K3LaunchConfig(48, 4096, 4, 32, 4096, 8, 32), 8),
+        (512, K3LaunchConfig(84, 4096, 4, 64, 2048, 4, 64), 8),
+        (1024, K3LaunchConfig(84, 4096, 4, 64, 2048, 4, 64), 0),
+        (8192, K3LaunchConfig(192, 4096, 4, 128, 2048, 4, 128), 0),
+    ),
+}
+
+
+def _k3_launch_row(rows: int) -> tuple[int, K3LaunchConfig, int]:
+    return next(row for row in _K3_LAUNCHES[iris_arch_name()] if rows <= row[0])
+
+
+def k3_launch_config(rows: int) -> K3LaunchConfig:
+    """Return the launch shape for a call of ``rows`` rows, at most 8192."""
+    return _k3_launch_row(rows)[1]
+
+
+def k3_fuses_mix(rows: int, num_valid_blocks: int) -> bool:
+    """Whether the attention gather mixes ``num_valid_blocks`` history itself."""
+    fused_blocks = _k3_launch_row(rows)[2]
+    return 0 < fused_blocks and num_valid_blocks <= fused_blocks
+
+
+def _max_programs(arch: str) -> tuple[int, int]:
+    launches = [launch for _, launch, _ in _K3_LAUNCHES[arch]]
+    return max(launch.reduce_programs for launch in launches), max(
+        max(launch.gather_programs, launch.plain_gather_programs)         for launch in launches
+    )
 
 
 def k3_kernels_supported() -> bool:
@@ -655,22 +712,32 @@ class IrisAllReduceShardedState:
 
     @staticmethod
     def heap_bytes(max_rows: int, world_size: int, dtype: torch.dtype) -> int:
-        return allocation_bytes((max_rows, 7168), dtype) + allocation_bytes(
-            (GATHER_PROGRAMS, world_size), torch.int32
+        reduce_programs, gather_programs = _max_programs(iris_arch_name())
+        size = allocation_bytes((max_rows, 7168), dtype) + allocation_bytes(
+            (gather_programs, world_size), torch.int32
         )
+        if reduce_programs > _PULL_MAX_PROGRAMS:
+            size += allocation_bytes((reduce_programs, world_size), torch.int32)
+        return size
 
     def __init__(self, pull: ProducerPull, *, max_rows: int) -> None:
         inputs = pull.producer.data
         assert inputs.numel() >= max_rows * (7168 + 3584)
         assert pull.scratch is not None
         assert pull.scratch.numel() >= max_rows // 8 * (7168 + 3584)
-        assert pull.ready_flags.shape[0] >= REDUCE_PROGRAMS
         peers = pull.producer.peers
+        reduce_programs, gather_programs = _max_programs(iris_arch_name())
         self.pull = pull
         self.rank = peers.rank
         self.heap_bases = peers.addresses
         self.output = peers.ctx.empty((max_rows, 7168), dtype=inputs.dtype)
-        self.gather_flags = peers.ctx.zeros((GATHER_PROGRAMS, 8), dtype=torch.int32)
+        self.gather_flags = peers.ctx.zeros((gather_programs, 8), dtype=torch.int32)
+        # The reduce borrows the pull path's entry flags when its grid fits.
+        self.reduce_flags = (
+            pull.ready_flags
+            if reduce_programs <= _PULL_MAX_PROGRAMS
+            else peers.ctx.zeros((reduce_programs, 8), dtype=torch.int32)
+        )
 
     def moe_tail(
         self,
@@ -725,13 +792,14 @@ class IrisAllReduceShardedState:
         routed_elements = local_rows * 3584
         shared_elements = local_rows * 7168
         scratch = self.pull.scratch
-        flags = self.pull.ready_flags
-        programs = REDUCE_PROGRAMS
-        gather_programs = GATHER_PROGRAMS
+        flags = self.reduce_flags
         result_buffer = self.output
         gather_flags = self.gather_flags
         if result_buffer.shape[0] < rows:
             return None
+        launch = k3_launch_config(rows)
+        programs = launch.reduce_programs
+        gather_programs = launch.gather_programs
         # Reject unsafe overlaps before launching either collective.
         for tensor in tensors[2:]:
             for buffer in (self.pull.producer.data, scratch, result_buffer):
@@ -772,11 +840,11 @@ class IrisAllReduceShardedState:
             ROWS=rows,
             FIRST_WIDTH=3584,
             SECOND_WIDTH=7168,
-            BLOCK_ELEMENTS=2048,
+            BLOCK_ELEMENTS=launch.reduce_block,
             NUM_PROGRAMS=programs,
-            NUM_WARPS=4,
+            NUM_WARPS=launch.reduce_warps,
             **iris_arch_config().constexprs,
-            num_warps=4,
+            num_warps=launch.reduce_warps,
         )
         normalized = (
             rmsnorm(routed, norm_weight, eps, residual=None, out=routed)
@@ -795,12 +863,12 @@ class IrisAllReduceShardedState:
             *self.heap_bases,
             RANK=self.rank,
             LOCAL_ROWS=local_rows,
-            BLOCK_ELEMENTS=2048,
+            BLOCK_ELEMENTS=launch.gather_block,
             NUM_PROGRAMS=gather_programs,
-            NUM_WARPS=4,
+            NUM_WARPS=launch.gather_warps,
             PREFIX_IS_SHARDED=prefix_is_sharded,
             **iris_arch_config().constexprs,
-            num_warps=4,
+            num_warps=launch.gather_warps,
         )
         return output
 
@@ -863,7 +931,7 @@ class IrisAllReduceShardedState:
             return None
 
         output_buffer = self.output
-        flags = self.pull.ready_flags
+        flags = self.reduce_flags
         gather_flags = self.gather_flags
         if output_buffer.shape[0] < partial.shape[0]:
             return None
@@ -897,12 +965,7 @@ class IrisAllReduceShardedState:
         ):
             return None
 
-        # The ordinary mixer is faster in the middle token range. At larger sizes,
-        # longer histories also need enough rows to amortize live peer pointers.
-        fuse_mix = (partial.shape[0] < 1024 or partial.shape[0] >= 4096) and (
-            num_valid_blocks <= 6
-            or (partial.shape[0] >= 7680 and num_valid_blocks <= 8)
-        )
+        launch = k3_launch_config(partial.shape[0])
         # Resolve the fused device function before either collective publishes.
         # It must be the one attn_res_fwd runs here, so both mixes agree bitwise.
         global _attn_res_mix
@@ -917,7 +980,7 @@ class IrisAllReduceShardedState:
 
         prefix = torch.empty_like(partial[:rows])
         output = output_buffer[: partial.shape[0]]
-        programs = REDUCE_PROGRAMS
+        programs = launch.reduce_programs
         iris_k3attn_pull_scatter[(programs,)](
             partial,
             residual,
@@ -926,15 +989,15 @@ class IrisAllReduceShardedState:
             *self.heap_bases,
             RANK=self.rank,
             LOCAL_ROWS=rows,
-            BLOCK_ELEMENTS=2048,
+            BLOCK_ELEMENTS=launch.reduce_block,
             NUM_PROGRAMS=programs,
-            NUM_WARPS=4,
+            NUM_WARPS=launch.reduce_warps,
             HAS_RESIDUAL=residual is not None,
             **iris_arch_config().constexprs,
-            num_warps=4,
+            num_warps=launch.reduce_warps,
         )
-        if fuse_mix:
-            gather_programs = GATHER_PROGRAMS
+        if k3_fuses_mix(partial.shape[0], num_valid_blocks):
+            gather_programs = launch.gather_programs
             num_subgroups = 8 if num_valid_blocks <= 7 else 4
             iris_k3attn_mix_push_gather[(gather_programs,)](
                 prefix,
@@ -972,7 +1035,7 @@ class IrisAllReduceShardedState:
                 num_valid_blocks=num_valid_blocks,
                 block_write_idx=-1,
             )
-            gather_programs = 32
+            gather_programs = launch.plain_gather_programs
             iris_k3attn_push_gather[(gather_programs,)](
                 mixed,
                 output,
@@ -980,10 +1043,10 @@ class IrisAllReduceShardedState:
                 *self.heap_bases,
                 RANK=self.rank,
                 LOCAL_ROWS=rows,
-                BLOCK_ELEMENTS=2048,
+                BLOCK_ELEMENTS=launch.gather_block,
                 NUM_PROGRAMS=gather_programs,
-                NUM_WARPS=4,
+                NUM_WARPS=launch.gather_warps,
                 **iris_arch_config().constexprs,
-                num_warps=4,
+                num_warps=launch.gather_warps,
             )
         return prefix, output
