@@ -48,7 +48,9 @@ def _require_iris():
 def test_attention_row_vector_codegen(rank, operation, has_residual, tmp_path):
     """Runtime rows must preserve vector payload traffic, including tail tiles."""
     from tokenspeed_kernel._triton import gluon, triton
+    from tokenspeed_kernel.ops.communication._iris.all_reduce import iris_arch_config
     from tokenspeed_kernel.ops.communication._iris.kimi_k3.allreduce_sharded import (
+        _arch_constexprs,
         iris_k3attn_pull_scatter,
         iris_k3attn_push_gather,
     )
@@ -59,6 +61,7 @@ def test_attention_row_vector_codegen(rank, operation, has_residual, tmp_path):
         "BLOCK_ELEMENTS": 2048,
         "NUM_PROGRAMS": 24 if operation == "reduce" else 32,
         "NUM_WARPS": 4,
+        **_arch_constexprs(iris_arch_config("gfx950")),
     }
     if operation == "reduce":
         constants["HAS_RESIDUAL"] = has_residual
@@ -138,6 +141,13 @@ def _attention_worker(rank: int, port: int) -> None:
         timeout=timedelta(seconds=180),
     )
     group = dist.new_group(backend="nccl", timeout=timedelta(seconds=180))
+    _check_attention_mix(rank, device, group)
+    dist.destroy_process_group()
+
+
+def _check_attention_mix(
+    rank: int, device: torch.device, group: dist.ProcessGroup
+) -> None:
     from tokenspeed_kernel.ops.communication._iris.kimi_k3 import (
         prepare_k3_communication,
     )
@@ -580,7 +590,6 @@ def _attention_worker(rank: int, port: int) -> None:
             )
             torch.testing.assert_close(results[4], expected_moe, atol=0, rtol=0)
     assert pointers == tuple(t.data_ptr() for t in buffers)
-    dist.destroy_process_group()
 
 
 @pytest.mark.skipif(
