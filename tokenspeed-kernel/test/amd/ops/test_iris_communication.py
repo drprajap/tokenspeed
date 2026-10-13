@@ -140,6 +140,34 @@ def test_plain_two_stage_is_independent_of_producer_thresholds(monkeypatch):
     assert not iris_ops._use_two_stage_producer_direct(8, 8 * 7168, torch.bfloat16)
 
 
+@pytest.mark.parametrize(
+    ("hosts", "configured", "expected"),
+    [
+        (None, None, {}),
+        (1, None, {}),
+        (2, None, {"allocator_type": "vmem_chunked"}),
+        (2, "torch", {"allocator_type": "torch"}),
+    ],
+    ids=["unmapped", "one-host", "two-hosts", "configured"],
+)
+def test_context_spanning_hosts_uses_the_fabric_allocator(
+    monkeypatch, hosts, configured, expected
+):
+    from tokenspeed_kernel.ops.communication import _iris
+
+    created = []
+    monkeypatch.setattr(_iris, "_context", None)
+    monkeypatch.setattr(_iris, "_allocator_type", configured)
+    monkeypatch.setattr(_iris, "group_host_span", lambda ranks: hosts)
+    monkeypatch.setattr(dist, "get_world_size", lambda: 8)
+    monkeypatch.setattr(
+        _iris.iris, "iris", lambda **options: created.append(options) or "ctx"
+    )
+
+    assert _iris.get_or_create_context(heap_size=1 << 20) == "ctx"
+    assert created == [{"heap_size": 1 << 20, **expected}]
+
+
 # ---------------------------------------------------------------------------
 # Suite 1: iris_all_reduce
 # ---------------------------------------------------------------------------

@@ -25,6 +25,7 @@ import math
 import torch
 import torch.distributed as dist
 from tokenspeed_kernel._triton import redirect_triton_to_tokenspeed_triton
+from tokenspeed_kernel.ops.communication.fabric import group_host_span
 
 with redirect_triton_to_tokenspeed_triton():
     import iris
@@ -37,7 +38,7 @@ _allocator_type: str | None = None
 
 
 def configure_iris(*, heap_size: int | None, allocator_type: str | None) -> None:
-    """Set heap options before preparation; None retains Iris's allocator default.
+    """Set heap options before preparation; None picks an allocator for the job.
 
     The allocator name is passed unchanged to Iris. Its IRIS_ALLOCATOR environment
     override retains upstream precedence. Neither option may change a live heap.
@@ -68,7 +69,15 @@ def get_or_create_context(*, heap_size: int):
         raise RuntimeError("Prepare Iris communication buffers before graph capture")
     if _context is None:
         size = _heap_size if _heap_size is not None else heap_size
-        options = {} if _allocator_type is None else {"allocator_type": _allocator_type}
+        allocator_type = _allocator_type
+        if (
+            allocator_type is None
+            and (group_host_span(range(dist.get_world_size())) or 1) > 1
+        ):
+            # The heap maps every world rank, and only this allocator reaches
+            # peers on other hosts.
+            allocator_type = "vmem_chunked"
+        options = {} if allocator_type is None else {"allocator_type": allocator_type}
         _context = iris.iris(heap_size=size, **options)
     return _context
 
