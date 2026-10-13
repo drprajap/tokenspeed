@@ -287,9 +287,7 @@ def _compile_k3(kind, rank):
     else:
         fn = getattr(sharded, f"iris_k3{kind}")
         constexprs.update(
-            NUM_PROGRAMS=sharded.REDUCE_PROGRAMS
-            if "pull" in kind
-            else sharded.GATHER_PROGRAMS,
+            NUM_PROGRAMS=24 if "pull" in kind else 128,
             **sharded._arch_constexprs(arch),
         )
         if kind == "attn_mix_push_gather":

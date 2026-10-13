@@ -155,6 +155,7 @@ def _check_attention_mix(
         iris_k3attn_mix_push_gather,
         iris_k3attn_pull_scatter,
         iris_k3attn_push_gather,
+        k3_launch_config,
     )
 
     k3_state = prepare_k3_communication(
@@ -252,7 +253,13 @@ def _check_attention_mix(
                 fused = (m < 1024 or m >= 4096) and (
                     valid_blocks <= 6 or (m >= 7680 and valid_blocks <= 8)
                 )
-                variant = (fused, valid_blocks, prefix is not None, history.stride(1))
+                variant = (
+                    fused,
+                    valid_blocks,
+                    prefix is not None,
+                    history.stride(1),
+                    k3_launch_config(m),
+                )
                 with ExitStack() as stack:
                     if variant in warmed_variants:
                         for kernel in (
