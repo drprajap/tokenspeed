@@ -1,4 +1,8 @@
-tokenspeed-iris==0.0.0.post20260511
+# Replace this version after ROCm/iris#568 merges and its tokenspeed-iris
+# wheel is published. PyPI currently has only 0.0.0.post20260511, whose vmem
+# allocator cannot span hosts. The #568 snapshot keeps SDMA opt-in.
+# iris @ git+https://github.com/ROCm/iris.git@638f3d097a3bae9c401624f5b810e68905d0166a
+tokenspeed-iris==0.0.0.post20261013
 tokenspeed-kernel-amd>=0.1.4
 # Petit relies on Gluon compiler behavior not yet available in tokenspeed-triton.
 triton==3.8.0
